@@ -1,0 +1,129 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="stage_1_open.sdf">
+    
+    <!-- Physics -->
+    <physics name="2ms" type="ignored">
+      <max_step_size>0.002</max_step_size>
+      <real_time_factor>0</real_time_factor>
+    </physics>
+    
+    <!-- Plugins -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    
+    <!-- Lighting -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+    
+    <!-- Ground Plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>200 200</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>200 200</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    
+    <!-- Start Point (Green) -->
+    <model name="start_marker">
+      <static>true</static>
+      <pose>-5.0 -3.0 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.5</radius>
+              <length>0.002</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>
+    
+    <!-- End Point (Red) -->
+    <model name="end_marker">
+      <static>true</static>
+      <pose>1.0 5.0 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.5</radius>
+              <length>0.002</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0 0 0 1</ambient>
+            <diffuse>0 0 0 1</diffuse>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>    
+    
+    <!-- Multi-UAV agents (each uses its own cmd_vel/odom namespace) -->
+    <include>
+      <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav1</uri>
+      <name>uav1</name>
+      <pose>-6.500 -4.500 1.00 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav2</uri>
+      <name>uav2</name>
+      <pose>-3.500 -4.500 1.00 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav3</uri>
+      <name>uav3</name>
+      <pose>-6.500 -1.500 1.00 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav4</uri>
+      <name>uav4</name>
+      <pose>-3.500 -1.500 1.00 0 0 0</pose>
+    </include>
+
+  </world>
+</sdf>

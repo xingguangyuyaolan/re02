@@ -1,0 +1,45 @@
+{
+  "episodes": 800,
+  "max_steps": 600,
+  "seed": 7,
+  "world_name": "stage_5_maze_like.sdf",
+  "goal_xyz": [
+    1.0,
+    5.0,
+    1.0
+  ],
+  "arena_x_limits": [
+    -10.0,
+    10.0
+  ],
+  "arena_y_limits": [
+    -10.0,
+    10.0
+  ],
+  "coverage_cell_size": 1.0,
+  "coverage_target_ratio": 0.65,
+  "coverage_new_cell_reward": 1.2,
+  "coverage_completion_bonus": 8.0,
+  "revisit_cell_penalty": 0.08,
+  "overlap_cell_penalty": 0.15,
+  "assignment_bonus": 0.2,
+  "local_coverage_radius": 1,
+  "startup_grace_steps": 16,
+  "out_of_bounds_penalty": 3.0,
+  "reset_position_tolerance": 1.5,
+  "batch_size": 32,
+  "lr": 0.0002,
+  "gamma": 0.99,
+  "epsilon": 1.0,
+  "epsilon_min": 0.05,
+  "epsilon_decay_steps": 200000,
+  "obs_clip": 20.0,
+  "q_clip": 10000.0,
+  "td_clip": 1000.0,
+  "grad_clip_norm": 10.0,
+  "diagnostics_interval": 50,
+  "output_root": "artifacts/qmix",
+  "run_name": "stage5_maze_like_seed7",
+  "checkpoint_interval": 50,
+  "save_best": true
+}
