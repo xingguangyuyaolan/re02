@@ -102,6 +102,8 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         collision_terminal=True,
         collision_cooldown_steps=10,
         survival_bonus=0.0,
+        boundary_penalty_margin=2.0,
+        boundary_penalty_scale=0.3,
     ):
         super().__init__()
         self.uav_names = uav_names or ["uav1", "uav2", "uav3", "uav4"]
@@ -151,6 +153,8 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         self.collision_terminal = bool(collision_terminal)
         self.collision_cooldown_steps = max(0, int(collision_cooldown_steps))
         self.survival_bonus = float(survival_bonus)
+        self.boundary_penalty_margin = float(boundary_penalty_margin)
+        self.boundary_penalty_scale = float(boundary_penalty_scale)
 
         # Shared spaces
         self.action_spaces = {
@@ -1122,6 +1126,16 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
                 reward -= self.collision_penalty
             if out_of_bounds:
                 reward -= self.out_of_bounds_penalty
+            elif sensor_ready and self.boundary_penalty_margin > 0:
+                # Soft gradient penalty near arena edges
+                margin = self.boundary_penalty_margin
+                dx = max(0, self.arena_x_limits[0] + margin - pose[0],
+                         pose[0] - (self.arena_x_limits[1] - margin))
+                dy = max(0, self.arena_y_limits[0] + margin - pose[1],
+                         pose[1] - (self.arena_y_limits[1] - margin))
+                boundary_closeness = (dx + dy) / margin  # 0 at margin edge, 1 at arena edge
+                if boundary_closeness > 0:
+                    reward -= self.boundary_penalty_scale * boundary_closeness
             if coverage_stats.get("coverage_completed_now", False):
                 reward += self.coverage_completion_bonus
 

@@ -389,6 +389,16 @@ class QMIXConfig:
     cross_agent_attn_heads: int = 4
     use_mixing_attention: bool = False
     train_interval: int = 2
+    # Early stopping controls
+    early_stop_enabled: bool = False
+    early_stop_min_episodes: int = 80
+    early_stop_window: int = 20
+    early_stop_patience_windows: int = 3
+    early_stop_min_delta: float = 2.0
+    early_stop_success_threshold: float = 0.5
+    early_stop_oob_threshold: float = 0.6
+    early_stop_fail_oob_threshold: float = 0.9
+    early_stop_fail_patience_windows: int = 4
 
 
 class QMIXForUAV:
@@ -1005,23 +1015,55 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
     completed_episodes = 0
     start_episode = 0
 
+    # Detect cross-stage curriculum transfer vs same-stage resume
+    cross_stage = False
+    if resume_target:
+        from_run = None
+        norm_path = os.path.normpath(resume_target)
+        parent = os.path.dirname(norm_path)
+        if os.path.basename(parent) == "checkpoints":
+            from_run = os.path.basename(os.path.dirname(parent))
+        else:
+            from_run = os.path.basename(parent) or None
+        if from_run and not from_run.startswith(cfg.run_name.rsplit("_", 2)[0] if "_" in cfg.run_name else cfg.run_name):
+            cross_stage = True
+
     if resume_target:
         if not os.path.exists(resume_target):
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_target}")
-        episode_metrics = _read_jsonl(run_paths["metrics_path"])
-        completed_episodes = int(episode_metrics[-1]["episode"]) if episode_metrics else 0
         resume_state = trainer.load_checkpoint(resume_target)
-        start_episode = int(resume_state["episode"])
-        completed_episodes = max(completed_episodes, start_episode)
-        total_steps = int(resume_state["total_steps"])
-        best_reward = resume_state["best_reward"]
-        LOGGER.info(
-            "[QMIX] Resumed from checkpoint "
-            f"{resume_target} (episode={start_episode}, total_steps={total_steps}, epsilon={trainer.epsilon:.3f})"
-        )
+        if cross_stage:
+            # Curriculum transfer: load network weights but reset training state
+            trainer.epsilon = cfg.epsilon
+            start_episode = 0
+            total_steps = 0
+            best_reward = None
+            episode_metrics = []
+            LOGGER.info(
+                "[QMIX] Cross-stage curriculum transfer from %s "
+                "(weights loaded, epsilon reset to %.3f, episode/steps reset to 0)",
+                resume_target, trainer.epsilon,
+            )
+        else:
+            # Same-stage resume: restore full training state
+            episode_metrics = _read_jsonl(run_paths["metrics_path"])
+            completed_episodes = int(episode_metrics[-1]["episode"]) if episode_metrics else 0
+            start_episode = int(resume_state["episode"])
+            completed_episodes = max(completed_episodes, start_episode)
+            total_steps = int(resume_state["total_steps"])
+            best_reward = resume_state["best_reward"]
+            LOGGER.info(
+                "[QMIX] Resumed from checkpoint "
+                f"{resume_target} (episode={start_episode}, total_steps={total_steps}, epsilon={trainer.epsilon:.3f})"
+            )
 
     interrupted = False
     pending_exception = None
+    early_stopped = False
+    early_stop_reason = None
+    best_window_reward = -np.inf
+    stagnant_windows = 0
+    fail_windows = 0
     try:
         for episode in range(start_episode, n_episodes):
             obs = env.reset()
@@ -1147,6 +1189,58 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                 train_update_time_sec,
                 train_updates,
             )
+
+            if cfg.early_stop_enabled and completed_episodes >= cfg.early_stop_min_episodes:
+                window = max(1, int(cfg.early_stop_window))
+                if len(episode_metrics) >= window:
+                    recent = episode_metrics[-window:]
+                    window_reward_mean = float(np.mean([m["reward"] for m in recent]))
+                    window_success_rate = float(np.mean([1.0 if m.get("full_coverage_success", False) else 0.0 for m in recent]))
+                    window_oob_rate = float(np.mean([m.get("out_of_bounds_rate", 1.0) for m in recent]))
+
+                    if window_reward_mean > best_window_reward + float(cfg.early_stop_min_delta):
+                        best_window_reward = window_reward_mean
+                        stagnant_windows = 0
+                    else:
+                        stagnant_windows += 1
+
+                    if window_oob_rate >= float(cfg.early_stop_fail_oob_threshold):
+                        fail_windows += 1
+                    else:
+                        fail_windows = 0
+
+                    converged = (
+                        window_success_rate >= float(cfg.early_stop_success_threshold)
+                        and window_oob_rate <= float(cfg.early_stop_oob_threshold)
+                        and stagnant_windows >= int(cfg.early_stop_patience_windows)
+                    )
+                    failed = (
+                        trainer.epsilon <= float(cfg.epsilon_min) + 1e-8
+                        and fail_windows >= int(cfg.early_stop_fail_patience_windows)
+                        and stagnant_windows >= int(cfg.early_stop_patience_windows)
+                    )
+
+                    if converged or failed:
+                        early_stopped = True
+                        early_stop_reason = {
+                            "type": "converged" if converged else "failed_oob",
+                            "window": window,
+                            "window_reward_mean": window_reward_mean,
+                            "window_success_rate": window_success_rate,
+                            "window_oob_rate": window_oob_rate,
+                            "stagnant_windows": int(stagnant_windows),
+                            "fail_windows": int(fail_windows),
+                        }
+                        LOGGER.info(
+                            "[QMIX] Early stopping triggered (%s): reward_mean=%.3f success=%.3f oob=%.3f stagnant=%d fail=%d",
+                            early_stop_reason["type"],
+                            window_reward_mean,
+                            window_success_rate,
+                            window_oob_rate,
+                            stagnant_windows,
+                            fail_windows,
+                        )
+                        break
     except BaseException as exc:
         interrupted = True
         pending_exception = exc
@@ -1180,6 +1274,8 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                 "resume_path": resume_target,
                 "start_episode": int(start_episode),
                 "interrupted": interrupted,
+                "early_stopped": bool(early_stopped),
+                "early_stop_reason": early_stop_reason,
                 "interrupt_type": None if pending_exception is None else type(pending_exception).__name__,
                 "best_reward": None if best_reward is None else float(best_reward),
                 "final_epsilon": float(trainer.epsilon),

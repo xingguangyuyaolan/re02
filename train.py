@@ -123,12 +123,27 @@ def _find_latest_run_name(output_root: str, base_run_name: str):
     return candidates[0][1]
 
 
+def _is_cross_stage_resume(base_run_name: str, resume_path: str) -> bool:
+    """Return True when resume checkpoint comes from a different run (curriculum stage transfer)."""
+    if not resume_path or resume_path == "latest":
+        return False
+    resumed_run_name = _run_name_from_resume_path(resume_path)
+    if resumed_run_name is None:
+        return False
+    # Strip timestamp suffix for comparison: "p0_stage1_open_seed7_20260419_113356" → "p0_stage1_open_seed7"
+    # base_run_name is already without timestamp, e.g. "p0_stage2_easy_seed7"
+    return not resumed_run_name.startswith(base_run_name)
+
+
 def _resolve_run_name(base_run_name: str, output_root: str, resume_path: str):
     if resume_path == "latest":
         latest_run_name = _find_latest_run_name(output_root, base_run_name)
         return latest_run_name or base_run_name
 
     if resume_path:
+        if _is_cross_stage_resume(base_run_name, resume_path):
+            # Curriculum transfer: create a new directory for the new stage
+            return _timestamped_run_name(base_run_name)
         resumed_run_name = _run_name_from_resume_path(resume_path)
         return resumed_run_name or base_run_name
     return _timestamped_run_name(base_run_name)
@@ -163,6 +178,8 @@ def main():
     collision_terminal = bool(_get_value(cfg_file, "collision_terminal", True))
     collision_cooldown_steps = int(_get_value(cfg_file, "collision_cooldown_steps", 10))
     survival_bonus = float(_get_value(cfg_file, "survival_bonus", 0.0))
+    boundary_penalty_margin = float(_get_value(cfg_file, "boundary_penalty_margin", 2.0))
+    boundary_penalty_scale = float(_get_value(cfg_file, "boundary_penalty_scale", 0.3))
 
     coverage_cell_size = float(_get_value(cfg_file, "coverage_cell_size", 1.0))
     coverage_target_ratio = float(_get_value(cfg_file, "coverage_target_ratio", 0.85))
@@ -212,6 +229,15 @@ def main():
         cross_agent_attn_heads=int(_get_value(cfg_file, "cross_agent_attn_heads", 4)),
         use_mixing_attention=bool(_get_value(cfg_file, "use_mixing_attention", False)),
         train_interval=int(_get_value(cfg_file, "train_interval", 2)),
+        early_stop_enabled=bool(_get_value(cfg_file, "early_stop_enabled", False)),
+        early_stop_min_episodes=int(_get_value(cfg_file, "early_stop_min_episodes", 80)),
+        early_stop_window=int(_get_value(cfg_file, "early_stop_window", 20)),
+        early_stop_patience_windows=int(_get_value(cfg_file, "early_stop_patience_windows", 3)),
+        early_stop_min_delta=float(_get_value(cfg_file, "early_stop_min_delta", 2.0)),
+        early_stop_success_threshold=float(_get_value(cfg_file, "early_stop_success_threshold", 0.5)),
+        early_stop_oob_threshold=float(_get_value(cfg_file, "early_stop_oob_threshold", 0.6)),
+        early_stop_fail_oob_threshold=float(_get_value(cfg_file, "early_stop_fail_oob_threshold", 0.9)),
+        early_stop_fail_patience_windows=int(_get_value(cfg_file, "early_stop_fail_patience_windows", 4)),
     )
 
     log_paths = setup_project_logging(qmix_cfg.output_root, qmix_cfg.run_name)
@@ -257,6 +283,8 @@ def main():
         collision_terminal=collision_terminal,
         collision_cooldown_steps=collision_cooldown_steps,
         survival_bonus=survival_bonus,
+        boundary_penalty_margin=boundary_penalty_margin,
+        boundary_penalty_scale=boundary_penalty_scale,
     )
 
     LOGGER.info(
