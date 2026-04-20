@@ -70,6 +70,38 @@ find_latest_run_dir() {
   printf "%s\n" "$latest"
 }
 
+check_stage_summary() {
+  local latest_run_dir="$1"
+  local stage_name="$2"
+  local summary_path="$latest_run_dir/summary.json"
+
+  if [[ ! -f "$summary_path" ]]; then
+    echo "[P0][$stage_name][warn] summary.json not found at $summary_path; skip interruption check." >&2
+    return 0
+  fi
+
+  local status
+  status="$(python3 - <<'PY' "$summary_path"
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = json.load(f)
+interrupted = bool(s.get("interrupted", False))
+interrupt_type = s.get("interrupt_type")
+if interrupted:
+    print(f"FAIL:{interrupt_type}")
+else:
+    print("OK")
+PY
+)"
+
+  if [[ "$status" == FAIL:* ]]; then
+    echo "[P0][$stage_name][error] Training interrupted according to summary: ${status#FAIL:}" >&2
+    echo "[P0][$stage_name][error] Summary: $summary_path" >&2
+    exit 1
+  fi
+}
+
 start_world_and_bridges() {
   local world_file="$1"
   local stage_name="$2"
@@ -136,6 +168,8 @@ run_stage() {
     echo "[P0][error] Cannot locate run directory for base '$run_name' in '$output_root'" >&2
     exit 1
   }
+
+  check_stage_summary "$latest_run_dir" "$stage_name"
 
   local best_model="$latest_run_dir/best_model.pt"
   local latest_model="$latest_run_dir/latest_model.pt"

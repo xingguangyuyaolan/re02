@@ -88,6 +88,8 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         arena_y_limits=(-10.0, 10.0),
         out_of_bounds_penalty=2.0,
         reset_position_tolerance=1.5,
+        reset_validation_retries=1,
+        reset_validation_allow_failure=False,
         reset_stabilization_timeout=1.5,
         reset_poll_interval=0.05,
         reset_initial_sensor_timeout=1.5,
@@ -104,6 +106,10 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         survival_bonus=0.0,
         boundary_penalty_margin=2.0,
         boundary_penalty_scale=0.3,
+        min_spawn_pair_clearance=0.28,
+        min_spawn_altitude=0.14,
+        spawn_layout_validation_retries=2,
+        spawn_layout_allow_risky=False,
     ):
         super().__init__()
         self.uav_names = uav_names or ["uav1", "uav2", "uav3", "uav4"]
@@ -139,6 +145,8 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         self.arena_y_limits = (float(arena_y_limits[0]), float(arena_y_limits[1]))
         self.out_of_bounds_penalty = float(out_of_bounds_penalty)
         self.reset_position_tolerance = float(reset_position_tolerance)
+        self.reset_validation_retries = max(0, int(reset_validation_retries))
+        self.reset_validation_allow_failure = bool(reset_validation_allow_failure)
         self.reset_stabilization_timeout = float(reset_stabilization_timeout)
         self.reset_poll_interval = float(reset_poll_interval)
         self.reset_initial_sensor_timeout = float(reset_initial_sensor_timeout)
@@ -155,6 +163,10 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         self.survival_bonus = float(survival_bonus)
         self.boundary_penalty_margin = float(boundary_penalty_margin)
         self.boundary_penalty_scale = float(boundary_penalty_scale)
+        self.min_spawn_pair_clearance = float(min_spawn_pair_clearance)
+        self.min_spawn_altitude = float(min_spawn_altitude)
+        self.spawn_layout_validation_retries = max(0, int(spawn_layout_validation_retries))
+        self.spawn_layout_allow_risky = bool(spawn_layout_allow_risky)
 
         # Shared spaces
         self.action_spaces = {
@@ -691,11 +703,9 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
 
         return obs
 
-    def _warn_if_spawn_layout_risky(self, obs):
-        if self._warned_spawn_layout:
-            return
+    def _assess_spawn_layout_risk(self, obs):
         if not all(self._has_agent_sensor_data(agent) for agent in self.agents):
-            return
+            return False, None, False, False
 
         positions = {agent: obs[agent]["pose"][:3] for agent in self.agents}
         min_pair_dist = np.inf
@@ -706,19 +716,25 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
 
         min_alt = min(float(obs[a]["pose"][2]) for a in self.agents)
         approx_lidar_clearance = min_pair_dist - 0.18
-        risky_alt = min_alt < self.min_height
-        risky_spacing = approx_lidar_clearance < self.collision_lidar_threshold
+        risky_alt = min_alt < self.min_spawn_altitude
+        risky_spacing = approx_lidar_clearance < self.min_spawn_pair_clearance
         if risky_alt or risky_spacing:
             message = (
                 "Potentially risky spawn layout detected: "
-                f"min_alt={min_alt:.3f} (threshold={self.min_height:.3f}), "
+                f"min_alt={min_alt:.3f} (threshold={self.min_spawn_altitude:.3f}), "
                 f"min_pair_dist={min_pair_dist:.3f}, "
                 f"approx_lidar_clearance={approx_lidar_clearance:.3f} "
-                f"(threshold={self.collision_lidar_threshold:.3f})."
+                f"(threshold={self.min_spawn_pair_clearance:.3f})."
             )
-            self._node.get_logger().warning(message)
-            self._py_logger.warning(message)
-            self._warned_spawn_layout = True
+            return True, message, risky_alt, risky_spacing
+        return False, None, False, False
+
+    def _warn_if_spawn_layout_risky(self, message):
+        if not message:
+            return
+        self._node.get_logger().warning(message)
+        self._py_logger.warning(message)
+        self._warned_spawn_layout = True
 
     def _compute_reset_xy_drift(self, obs):
         if not all(self._has_agent_sensor_data(agent) for agent in self.agents):
@@ -767,6 +783,13 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
                 f"max XY drift={drift:.3f}m > tolerance={self.reset_position_tolerance:.3f}m. "
                 f"Please check Gazebo reset service '{self._reset_service_name}' and world reset semantics."
             )
+
+    def _build_reset_drift_error(self, drift):
+        return (
+            "Environment reset failed: UAVs did not return to initial XY positions. "
+            f"max XY drift={drift:.3f}m > tolerance={self.reset_position_tolerance:.3f}m. "
+            f"Please check Gazebo reset service '{self._reset_service_name}' and world reset semantics."
+        )
 
     def _reset_simulation(self):
         # Attempt to reset via ROS service first, then fall back to Gazebo native service.
@@ -976,30 +999,110 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
                 "Training would continue from old state, so it has been stopped intentionally."
             )
 
-        # Clear stored sensor data so we don't return stale observations.
-        self._last_odom = {agent: None for agent in self.agents}
-        self._last_lidar = {agent: None for agent in self.agents}
-        self._dones = {agent: False for agent in self.agents}
-        self._collision_cooldown = {agent: 0 for agent in self.agents}
-        self._prev_goal_dist = {agent: None for agent in self.agents}
-        self._step_count = 0
-        self._reset_coverage_state()
+        obs = None
+        reset_drift = None
+        max_attempts = max(1, max(self.reset_validation_retries, self.spawn_layout_validation_retries) + 1)
+        for attempt in range(max_attempts):
+            # Clear stored sensor data so we don't return stale observations.
+            self._last_odom = {agent: None for agent in self.agents}
+            self._last_lidar = {agent: None for agent in self.agents}
+            self._dones = {agent: False for agent in self.agents}
+            self._collision_cooldown = {agent: 0 for agent in self.agents}
+            self._prev_goal_dist = {agent: None for agent in self.agents}
+            self._step_count = 0
+            self._reset_coverage_state()
 
-        # Publish zero command to stop movement after reset.
-        for pub in self._publishers.values():
-            pub.publish(Twist())
+            # Publish zero command to stop movement after reset.
+            for pub in self._publishers.values():
+                pub.publish(Twist())
 
-        # Give gazebo / ROS a chance to update after reset.
-        # Use longer timeout on first reset to allow bridges to stabilize
-        initial_wait_timeout = self.reset_initial_sensor_timeout_first if is_first_reset else self.reset_initial_sensor_timeout
-        sensor_data_ok = self._wait_for_sensor_data(timeout=initial_wait_timeout)
-        if not sensor_data_ok:
-            self._warn_sensor_unavailable()
+            # Give gazebo / ROS a chance to update after reset.
+            # Use longer timeout on first reset to allow bridges to stabilize
+            initial_wait_timeout = self.reset_initial_sensor_timeout_first if is_first_reset else self.reset_initial_sensor_timeout
+            sensor_data_ok = self._wait_for_sensor_data(timeout=initial_wait_timeout)
+            if not sensor_data_ok:
+                self._warn_sensor_unavailable()
 
-        obs = self._collect_observation()
-        obs, reset_drift = self._wait_for_reset_stabilization(obs)
-        self._warn_if_spawn_layout_risky(obs)
-        self._validate_reset_positions(obs, reset_drift)
+            obs = self._collect_observation()
+            obs, reset_drift = self._wait_for_reset_stabilization(obs)
+            risky_spawn, risky_message, risky_alt, risky_spacing = self._assess_spawn_layout_risk(obs)
+
+            drift_ok = (reset_drift is None or reset_drift <= self.reset_position_tolerance)
+            spawn_ok = not risky_spawn
+            mild_spawn_risk = risky_alt and not risky_spacing
+
+            if drift_ok and (spawn_ok or mild_spawn_risk):
+                if mild_spawn_risk and risky_message:
+                    self._py_logger.warning(
+                        "[ResetValidation] Mild spawn altitude risk accepted: %s",
+                        risky_message,
+                    )
+                break
+
+            if attempt < max_attempts - 1:
+                issues = []
+                severe_drift = False
+                if not drift_ok:
+                    issues.append(
+                        f"drift {reset_drift:.3f}m > tol {self.reset_position_tolerance:.3f}m"
+                    )
+                    severe_drift = reset_drift > (self.reset_position_tolerance * 1.8)
+                if risky_spawn:
+                    if risky_spacing:
+                        issues.append("risky spawn spacing")
+                    elif risky_alt:
+                        issues.append("risky spawn altitude")
+                self._py_logger.warning(
+                    "[ResetValidation] %s (attempt %d/%d); retrying reset.",
+                    ", ".join(issues),
+                    attempt + 1,
+                    max_attempts,
+                )
+                reset_ok = False
+                spacing_needs_escalation = risky_spacing and attempt >= 1
+                if severe_drift or spacing_needs_escalation:
+                    self._py_logger.warning(
+                        "[ResetValidation] Escalating recovery (severe_drift=%s, risky_spacing=%s). Restarting simulation stack before retry.",
+                        severe_drift,
+                        risky_spacing,
+                    )
+                    if self._restart_simulation_stack():
+                        reset_ok = self._reset_simulation()
+                if not reset_ok:
+                    reset_ok = self._reset_simulation()
+                if not reset_ok and self._restart_simulation_stack():
+                    reset_ok = self._reset_simulation()
+                if not reset_ok:
+                    raise RuntimeError(
+                        f"Failed to reset world '{self.world_name}' during drift recovery retry."
+                    )
+                continue
+
+            if not spawn_ok:
+                if risky_alt and not risky_spacing:
+                    self._py_logger.warning(
+                        "[ResetValidation] Proceeding with mild spawn altitude risk after retries: %s",
+                        risky_message,
+                    )
+                elif self.spawn_layout_allow_risky:
+                    self._py_logger.warning(
+                        "[ResetValidation] %s Proceeding due to spawn_layout_allow_risky=true.",
+                        risky_message,
+                    )
+                else:
+                    raise RuntimeError(
+                        "Environment reset failed: spawn layout remains risky after retries. "
+                        f"{risky_message}"
+                    )
+
+            if not drift_ok and self.reset_validation_allow_failure:
+                self._py_logger.warning(
+                    "[ResetValidation] %s Proceeding due to reset_validation_allow_failure=true.",
+                    self._build_reset_drift_error(reset_drift),
+                )
+            elif not drift_ok:
+                raise RuntimeError(self._build_reset_drift_error(reset_drift))
+
         if not all(self._has_agent_sensor_data(agent) for agent in self.agents):
             self._warn_sensor_unavailable()
         self._register_coverage(obs)

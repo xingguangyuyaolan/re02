@@ -34,6 +34,12 @@
 
   "reset_timeout": 5.0,
   "reset_position_tolerance": 5,
+  "reset_validation_retries": 2,
+  "reset_validation_allow_failure": false,
+  "min_spawn_pair_clearance": 0.24,
+  "min_spawn_altitude": 0.14,
+  "spawn_layout_validation_retries": 2,
+  "spawn_layout_allow_risky": false,
   "reset_stabilization_timeout": 1.5,
   "reset_poll_interval": 0.05,
   "reset_initial_sensor_timeout": 1.2,

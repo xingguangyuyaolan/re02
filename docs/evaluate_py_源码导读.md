@@ -1,123 +1,53 @@
-# evaluate.py 源码导读
+# evaluate.py 源码导读（当前版本）
 
-对应源码：
-- [evaluate.py](evaluate.py)
+对应文件：`evaluate.py`
 
-作用定位：
-- 离线评估训练好的模型。
-- 读取 checkpoint，构造与训练一致的策略网络，在 epsilon=0 下做纯贪心评估。
+更新时间：2026-04-20
 
----
+## 1. 文件职责
 
-## 1. 调用总览
+`evaluate.py` 用于对训练完成模型进行离线评测，输出：
 
-主函数入口：
-- [evaluate.py](evaluate.py#L114)
+1. 回合级评测明细
+2. 汇总统计
+3. 评测图表
 
-调用链：
-1. 参数解析 [_parse_args](evaluate.py#L47)
-2. 解析模型路径 [_resolve_model_path](evaluate.py#L91)
-3. 加载运行配置 [_load_run_config](evaluate.py#L107)
-4. 根据配置重建 QMIXForUAV
-5. 加载 checkpoint 并强制 epsilon=0
-6. 构建环境并执行评估回合
-7. 输出汇总指标
+## 2. 关键流程
 
----
+1. 解析 `--run-dir` 或 `--model`
+2. 加载训练时保存的 `config.json`
+3. 重建与训练一致的模型结构
+4. 加载 checkpoint，强制 `epsilon=0` 贪心评估
+5. 重建环境并执行评测
+6. 写出 `evaluation/<timestamp>/` 工件
 
-## 2. 关键函数逐段说明
+## 3. 当前版本对齐点
 
-### 2.1 _parse_args
-- 位置：[evaluate.py](evaluate.py#L47)
-- 输入：命令行
-- 输出：argparse 命名空间
-- 关键参数：
-  - --run-dir 或 --model（二选一）
-  - --episodes
-  - --max-steps
-  - --device
-  - --goal-x/--goal-y/--goal-z
-  - --world
+### 3.1 模型结构对齐
 
-常见坑：
-- run-dir 和 model 同时传会冲突，脚本已用 mutually exclusive group 限制。
+评测会恢复注意力相关开关，避免“训练结构与评测结构不一致”。
 
-### 2.2 _resolve_model_path
-- 位置：[evaluate.py](evaluate.py#L91)
-- 输入：args
-- 输出：model_path, config_path
-- 逻辑：
-  - 给 run-dir 时优先 best_model.pt，否则 final_model.pt
-- 常见坑：
-  - run-dir 不完整时会找不到模型文件。
+### 3.2 环境参数对齐
 
-### 2.3 _load_run_config
-- 位置：[evaluate.py](evaluate.py#L107)
-- 输入：config_path
-- 输出：dict 或 None
-- 作用：读取训练阶段保存的结构与配置快照。
+评测会恢复关键环境参数（边界、碰撞、重置、安全约束等），保证训练-评测口径一致。
 
-### 2.4 main
-- 位置：[evaluate.py](evaluate.py#L114)
-- 输入：无（内部读取 args）
-- 输出：控制台评估摘要
+### 3.3 兼容旧 run
 
-分段逻辑：
-1. 解析路径与配置
-2. 读取模型结构参数（n_agents/obs_dim/state_dim/action_table）
-3. 构建 QMIXConfig，强制 epsilon=0
-4. 实例化 QMIXForUAV 并 load_checkpoint
-5. 创建环境并按回合评估
-6. 汇总平均 reward、成功率、平均步数
+若历史 run 配置字段不完整，评测会按默认值回退。
 
----
+## 4. 常用命令
 
-## 3. 张量与数据流
+```bash
+python evaluate.py --run-dir artifacts/qmix/<run_name> --episodes 10 --max-steps 500
+python evaluate.py --model artifacts/qmix/<run_name>/best_model.pt --episodes 10
+python evaluate.py --run-dir artifacts/qmix/<run_name> --device cpu
+```
 
-每回合循环里关键数据：
-- obs_n: [n_agents, obs_dim]
-- last_onehot_a: [n_agents, action_dim]
-- avail_a_n: [n_agents, action_dim]
-- a_n: [n_agents]
-- actions_cont: [n_agents, 4]
+## 5. 输出文件
 
-关键调用：
-- 观测转矩阵 [_obs_dict_to_matrix](src/scripts/attention_qmix.py#L452)
-- 动作选择 choose_action [src/scripts/attention_qmix.py](src/scripts/attention_qmix.py#L301)
-- 离散到连续映射 discrete_to_continuous [src/scripts/attention_qmix.py](src/scripts/attention_qmix.py#L324)
+评测目录下生成：
 
----
-
-## 4. 评估指标含义
-
-输出摘要在 [evaluate.py](evaluate.py#L244)：
-- Mean reward: 平均回报
-- Success rate: 至少有一个 agent 到达目标的回合占比
-- Mean steps: 平均回合长度
-
-注意：
-- 当前成功判据是任意 agent reached_goal 为 true，不是全体到达。
-
----
-
-## 5. 常见坑
-
-1. 评估 world 与训练 world 不一致
-- 可能造成指标不可比。
-
-2. 误把评估当训练
-- evaluate 不会更新参数，始终推理模式。
-
-3. 忘记 epsilon=0 的意义
-- 这是去探索化评估，指标更稳定但不代表探索能力。
-
-4. 缺少 config.json 时使用默认结构
-- 如果训练结构与默认不同，评估可能偏差。
-
----
-
-## 6. 推荐阅读顺序
-
-1. [evaluate.py](evaluate.py#L114)
-2. [src/scripts/attention_qmix.py](src/scripts/attention_qmix.py#L274)
-3. [src/scripts/gazebo_pettingzoo_env.py](src/scripts/gazebo_pettingzoo_env.py#L552)
+1. `episode_metrics.jsonl`
+2. `summary.json`
+3. `eval_performance.png`
+4. `eval_task_metrics.png`

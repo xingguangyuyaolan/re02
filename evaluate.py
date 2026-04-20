@@ -184,6 +184,14 @@ def _load_run_config(config_path):
         return json.load(f)
 
 
+def _cfg_get(*sources, key, default):
+    """Get key from multiple dict-like sources with graceful fallback."""
+    for source in sources:
+        if isinstance(source, dict) and key in source and source[key] is not None:
+            return source[key]
+    return default
+
+
 def main():
     args = _parse_args()
     model_path, config_path = _resolve_model_path(args)
@@ -202,9 +210,10 @@ def main():
         action_table = run_config["action_table"]
         saved_cfg = run_config.get("config", {})
         saved_env_cfg = run_config.get("env_config", {})
+        saved_train_cfg = run_config.get("train_config", {})
     else:
         LOGGER.warning("config.json not found; using default architecture parameters")
-        n_agents, obs_dim, state_dim = 4, 49, 196
+        n_agents, obs_dim, state_dim = 4, 110, 440
         action_table = [
             [0.0, 0.0, 0.0, 0.0],
             [0.8, 0.0, 0.0, 0.0],
@@ -222,6 +231,7 @@ def main():
         ]
         saved_cfg = {}
         saved_env_cfg = {}
+        saved_train_cfg = {}
 
     cfg = QMIXConfig(
         rnn_hidden_dim=int(saved_cfg.get("rnn_hidden_dim", 64)),
@@ -232,6 +242,12 @@ def main():
         add_last_action=bool(saved_cfg.get("add_last_action", True)),
         add_agent_id=bool(saved_cfg.get("add_agent_id", True)),
         batch_size=int(saved_cfg.get("batch_size", 32)),
+        use_self_attention=bool(saved_cfg.get("use_self_attention", False)),
+        self_attn_heads=int(saved_cfg.get("self_attn_heads", 4)),
+        self_attn_tokens=int(saved_cfg.get("self_attn_tokens", 4)),
+        use_cross_agent_attention=bool(saved_cfg.get("use_cross_agent_attention", False)),
+        cross_agent_attn_heads=int(saved_cfg.get("cross_agent_attn_heads", 4)),
+        use_mixing_attention=bool(saved_cfg.get("use_mixing_attention", False)),
         # Force epsilon=0 during evaluation (pure greedy, no exploration)
         epsilon=0.0,
         epsilon_min=0.0,
@@ -254,19 +270,50 @@ def main():
 
     env = GazeboMultiUAVParallelEnv(
         uav_names=["uav1", "uav2", "uav3", "uav4"],
-        lidar_size=36,
+        lidar_size=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="lidar_size", default=36)),
         world_name=world_name,
         max_steps=args.max_steps,
-        arena_x_limits=tuple(saved_env_cfg.get("arena_x_limits", [-10.0, 10.0])),
-        arena_y_limits=tuple(saved_env_cfg.get("arena_y_limits", [-10.0, 10.0])),
-        coverage_cell_size=float(saved_env_cfg.get("coverage_cell_size", 1.0)),
-        coverage_target_ratio=float(saved_env_cfg.get("coverage_target_ratio", 0.85)),
-        coverage_new_cell_reward=float(saved_env_cfg.get("coverage_new_cell_reward", 1.2)),
-        coverage_completion_bonus=float(saved_env_cfg.get("coverage_completion_bonus", 8.0)),
-        revisit_cell_penalty=float(saved_env_cfg.get("revisit_cell_penalty", 0.08)),
-        overlap_cell_penalty=float(saved_env_cfg.get("overlap_cell_penalty", 0.15)),
-        assignment_bonus=float(saved_env_cfg.get("assignment_bonus", 0.2)),
-        local_coverage_radius=int(saved_env_cfg.get("local_coverage_radius", 1)),
+        reset_timeout=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_timeout", default=2.0)),
+        startup_grace_steps=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="startup_grace_steps", default=8)),
+        arena_x_limits=tuple(_cfg_get(saved_env_cfg, saved_train_cfg, key="arena_x_limits", default=[-10.0, 10.0])),
+        arena_y_limits=tuple(_cfg_get(saved_env_cfg, saved_train_cfg, key="arena_y_limits", default=[-10.0, 10.0])),
+        out_of_bounds_penalty=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="out_of_bounds_penalty", default=2.0)),
+        coverage_cell_size=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="coverage_cell_size", default=1.0)),
+        coverage_target_ratio=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="coverage_target_ratio", default=0.85)),
+        coverage_new_cell_reward=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="coverage_new_cell_reward", default=1.2)),
+        coverage_completion_bonus=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="coverage_completion_bonus", default=8.0)),
+        revisit_cell_penalty=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="revisit_cell_penalty", default=0.08)),
+        overlap_cell_penalty=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="overlap_cell_penalty", default=0.15)),
+        assignment_bonus=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="assignment_bonus", default=0.2)),
+        local_coverage_radius=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="local_coverage_radius", default=1)),
+        sensor_coverage_radius=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="sensor_coverage_radius", default=1)),
+        local_map_size=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="local_map_size", default=7)),
+        coverage_delta_scale=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="coverage_delta_scale", default=0.0)),
+        reset_position_tolerance=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_position_tolerance", default=5.0)),
+        reset_validation_retries=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_validation_retries", default=1)),
+        reset_validation_allow_failure=bool(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_validation_allow_failure", default=False)),
+        min_spawn_pair_clearance=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="min_spawn_pair_clearance", default=0.28)),
+        min_spawn_altitude=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="min_spawn_altitude", default=0.14)),
+        spawn_layout_validation_retries=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="spawn_layout_validation_retries", default=2)),
+        spawn_layout_allow_risky=bool(_cfg_get(saved_env_cfg, saved_train_cfg, key="spawn_layout_allow_risky", default=False)),
+        reset_stabilization_timeout=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_stabilization_timeout", default=1.5)),
+        reset_poll_interval=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_poll_interval", default=0.05)),
+        reset_initial_sensor_timeout=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_initial_sensor_timeout", default=1.5)),
+        reset_initial_sensor_timeout_first=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="reset_initial_sensor_timeout_first", default=4.0)),
+        pre_reset_brake_wait=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="pre_reset_brake_wait", default=0.03)),
+        action_update_timeout=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="action_update_timeout", default=0.03)),
+        require_step_lidar_update=bool(_cfg_get(saved_env_cfg, saved_train_cfg, key="require_step_lidar_update", default=False)),
+        min_height_enforce_steps=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="min_height_enforce_steps", default=60)),
+        hard_floor_height=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="hard_floor_height", default=0.08)),
+        min_step_duration=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="min_step_duration", default=0.05)),
+        altitude_safety_threshold=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="altitude_safety_threshold", default=0.4)),
+        low_altitude_penalty=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="low_altitude_penalty", default=0.3)),
+        collision_penalty=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="collision_penalty", default=1.5)),
+        collision_terminal=bool(_cfg_get(saved_env_cfg, saved_train_cfg, key="collision_terminal", default=True)),
+        collision_cooldown_steps=int(_cfg_get(saved_env_cfg, saved_train_cfg, key="collision_cooldown_steps", default=10)),
+        survival_bonus=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="survival_bonus", default=0.0)),
+        boundary_penalty_margin=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="boundary_penalty_margin", default=2.0)),
+        boundary_penalty_scale=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="boundary_penalty_scale", default=0.3)),
     )
 
     # --- Evaluation loop (epsilon=0, greedy) ---
