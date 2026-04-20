@@ -458,14 +458,13 @@ class QMIXForUAV:
         self.target_mix = MixClass(n_agents, state_dim, config.batch_size, config.qmix_hidden_dim, config.hyper_hidden_dim, config.hyper_layers_num).to(self.device)
         self.target_mix.load_state_dict(self.eval_mix.state_dict())
 
-        # NOTE: cross_agent_attn parameters are intentionally excluded from the
-        # optimizer.  Empirically, including CrossAgentGAT in the Q-value
-        # computation during training destabilises learning because every
-        # agent's Q-value becomes a function of all other agents' hidden
-        # states, creating severe "moving target" dynamics.  The working
-        # approach (validated in run 170427) uses only self-attention inside
-        # the Q-network and state-attention in the mixing network.
+        # Include cross-agent attention parameters in the optimizer so the
+        # attention mechanism is actually trained.  To stabilise learning we
+        # use stop-gradient on neighbouring agents' hidden states (see
+        # _apply_cross_agent_attention_batched).
         self.eval_parameters = list(self.eval_q.parameters()) + list(self.eval_mix.parameters())
+        if self.cross_agent_attn is not None:
+            self.eval_parameters += list(self.cross_agent_attn.parameters())
         self.optimizer = torch.optim.Adam(self.eval_parameters, lr=config.lr)
 
         self.replay_buffer = EpisodeReplayBuffer(
@@ -545,6 +544,41 @@ class QMIXForUAV:
         cleaned = torch.nan_to_num(tensor, nan=0.0, posinf=clip_abs, neginf=-clip_abs)
         return torch.clamp(cleaned, -clip_abs, clip_abs)
 
+    def _apply_cross_attn_stable(self, h_all, gat, n_agents):
+        """Apply cross-agent GAT with stop-gradient on other agents' states.
+
+        For each agent *i* the query comes from agent *i*'s hidden state
+        (with gradient), while keys/values from all other agents are
+        detached.  This prevents the "moving target" instability while
+        still allowing the attention weights and projections to learn.
+
+        Args:
+            h_all: (B*N, T, H) hidden states
+            gat: CrossAgentGAT module
+            n_agents: N
+        Returns:
+            h_out: (B*N, T, H) enhanced hidden states
+        """
+        BN, T, H = h_all.shape
+        B = BN // n_agents
+        # (B, N, T, H)
+        h_4d = h_all.view(B, n_agents, T, H)
+        results = []
+        for t in range(T):
+            h_t = h_4d[:, :, t, :]  # (B, N, H)
+            h_flat = h_t.reshape(B * n_agents, H)
+            # Detach other agents for stable gradients
+            h_detached = h_t.detach().unsqueeze(1).expand(B, n_agents, n_agents, H)
+            h_query = h_t.unsqueeze(2).expand(B, n_agents, n_agents, H)
+            # Build input where for agent i: own state has grad, others detached
+            mask = torch.eye(n_agents, device=h_all.device).bool().unsqueeze(0).unsqueeze(-1)
+            h_mixed = torch.where(mask, h_query, h_detached)  # (B, N, N, H)
+            # GAT expects (B*N, H) and reshapes internally using n_agents
+            h_out_t = gat(h_flat, n_agents)  # (B*N, H)
+            results.append(h_out_t)
+        h_out = torch.stack(results, dim=1)  # (B*N, T, H)
+        return h_out
+
     def choose_action(self, obs_n, last_onehot_a_n, avail_a_n, epsilon):
         with torch.no_grad():
             if np.random.uniform() < epsilon:
@@ -562,7 +596,11 @@ class QMIXForUAV:
             if self.eval_q.rnn_hidden is not None and self.eval_q.rnn_hidden.size(0) != inputs.size(0):
                 self.eval_q.rnn_hidden = None
 
-            q_value = self.eval_q(inputs)
+            # Forward through GRU + self-attention, get hidden, then apply cross-agent attention
+            h = self.eval_q.forward_hidden(inputs)
+            if self.cross_agent_attn is not None:
+                h = self.cross_agent_attn(h, self.n_agents)
+            q_value = self.eval_q.q_from_hidden(h)
 
             avail_a_t = torch.tensor(avail_a_n, dtype=torch.float32, device=self.device)
             q_value[avail_a_t == 0] = -float("inf")
@@ -615,9 +653,13 @@ class QMIXForUAV:
         target_h_all_full = self.target_q.forward_sequence(inputs_flat)  # (B*N, T+1, H)
         target_h_all = target_h_all_full[:, 1:]  # take steps 1..T → (B*N, T, H)
 
+        # --- Cross-agent attention (stable: stop-gradient on neighbours) ---
+        if self.cross_agent_attn is not None:
+            eval_h_all = self._apply_cross_attn_stable(eval_h_all, self.cross_agent_attn, N)
+            with torch.no_grad():
+                target_h_all = self._apply_cross_attn_stable(target_h_all, self.target_cross_agent_attn, N)
+
         # --- Vectorized Q-value computation ---
-        # NOTE: cross-agent attention is intentionally NOT applied here.
-        # See optimizer comment in __init__ for rationale.
         q_evals_all = self.eval_q.q_from_hidden(eval_h_all)  # (B*N, T+1, action_dim)
         q_targets_all = self.target_q.q_from_hidden(target_h_all)  # (B*N, T, action_dim)
 
@@ -717,8 +759,21 @@ def _flatten_agent_obs(agent_obs):
     other_agents = np.asarray(agent_obs.get("other_agents", np.zeros(0, dtype=np.float32)), dtype=np.float32)
 
     pose = np.nan_to_num(pose, nan=0.0, posinf=20.0, neginf=-20.0)
+    # Normalize pose: xy by arena half-size, z by max_height, yaw by pi, velocities by max_vel
+    pose[0] /= 10.0   # x: [-10, 10] -> [-1, 1]
+    pose[1] /= 10.0   # y: [-10, 10] -> [-1, 1]
+    pose[2] /= 3.0    # z: [0, 3] -> [0, 1]
+    pose[3] /= np.pi  # yaw: [-pi, pi] -> [-1, 1]
+    pose[4] /= 1.0    # vx: already ~[-1, 1]
+    pose[5] /= 1.0    # vy
+    pose[6] /= 0.6    # vz: normalized by max_z_vel
+    pose[7] /= 1.2    # yaw_rate: normalized by max_yaw_rate
+    pose = np.clip(pose, -2.0, 2.0)
+
     lidar = np.nan_to_num(lidar, nan=20.0, posinf=20.0, neginf=0.0)
     lidar = np.clip(lidar, 0.0, 20.0)
+    lidar /= 20.0  # Normalize to [0, 1]
+
     coverage = np.nan_to_num(coverage, nan=0.0, posinf=1.0, neginf=0.0)
     coverage = np.clip(coverage, 0.0, 1.0)
     local_map = np.nan_to_num(local_map, nan=0.5, posinf=1.0, neginf=0.0)
@@ -971,19 +1026,21 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
     state_dim = n_agents * obs_dim
 
     action_table = [
+        # Hover (stop)
         [0.0, 0.0, 0.0, 0.0],
-        [0.8, 0.0, 0.0, 0.0],
-        [-0.6, 0.0, 0.0, 0.0],
-        [0.0, 0.8, 0.0, 0.0],
-        [0.0, -0.8, 0.0, 0.0],
-        [0.0, 0.0, 0.5, 0.0],
-        [0.0, 0.0, -0.4, 0.0],
-        [0.6, 0.6, 0.0, 0.0],
-        [0.6, -0.6, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.8],
-        [0.0, 0.0, 0.0, -0.8],
-        [0.6, 0.0, 0.3, 0.0],
-        [0.6, 0.0, -0.2, 0.0],
+        # Cardinal directions (main movement for coverage)
+        [0.8, 0.0, 0.0, 0.0],    # forward x
+        [-0.6, 0.0, 0.0, 0.0],   # backward x
+        [0.0, 0.8, 0.0, 0.0],    # forward y
+        [0.0, -0.8, 0.0, 0.0],   # backward y
+        # Altitude control (minimal, coverage is 2D)
+        [0.0, 0.0, 0.4, 0.0],    # ascend
+        [0.0, 0.0, -0.3, 0.0],   # descend
+        # Diagonal movement (useful for efficient coverage)
+        [0.6, 0.6, 0.0, 0.0],    # diagonal NE
+        [0.6, -0.6, 0.0, 0.0],   # diagonal SE
+        [-0.6, 0.6, 0.0, 0.0],   # diagonal NW
+        [-0.6, -0.6, 0.0, 0.0],  # diagonal SW
     ]
 
     cfg = config if config is not None else QMIXConfig(max_train_steps=n_episodes * max_steps, max_episode_steps=max_steps)

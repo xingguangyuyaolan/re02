@@ -186,6 +186,7 @@ def main():
     survival_bonus = float(_get_value(cfg_file, "survival_bonus", 0.0))
     boundary_penalty_margin = float(_get_value(cfg_file, "boundary_penalty_margin", 2.0))
     boundary_penalty_scale = float(_get_value(cfg_file, "boundary_penalty_scale", 0.3))
+    step_penalty = float(_get_value(cfg_file, "step_penalty", 0.01))
 
     coverage_cell_size = float(_get_value(cfg_file, "coverage_cell_size", 1.0))
     coverage_target_ratio = float(_get_value(cfg_file, "coverage_target_ratio", 0.85))
@@ -297,6 +298,7 @@ def main():
         survival_bonus=survival_bonus,
         boundary_penalty_margin=boundary_penalty_margin,
         boundary_penalty_scale=boundary_penalty_scale,
+        step_penalty=step_penalty,
     )
 
     LOGGER.info(
