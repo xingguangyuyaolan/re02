@@ -399,6 +399,13 @@ class QMIXConfig:
     early_stop_oob_threshold: float = 0.6
     early_stop_fail_oob_threshold: float = 0.9
     early_stop_fail_patience_windows: int = 4
+    # Safety shield controls (action override for imminent inter-agent collision)
+    safety_shield_enabled: bool = True
+    safety_shield_horizon_sec: float = 0.6
+    safety_shield_danger_dist: float = 0.8
+    safety_shield_emergency_dist: float = 0.45
+    safety_shield_lidar_dist: float = 0.45
+    safety_shield_boundary_margin: float = 1.2
 
 
 class QMIXForUAV:
@@ -791,12 +798,166 @@ def _state_from_obs_matrix(obs_matrix):
     return obs_matrix.reshape(-1).astype(np.float32)
 
 
+def _away_action_index(action_table, away_vec_xy):
+    """Pick discrete action that best aligns with an away vector in XY plane.
+
+    Returns action index 0 (hover) when no meaningful away direction exists.
+    """
+    away_norm = float(np.linalg.norm(away_vec_xy))
+    if away_norm <= 1e-8:
+        return 0
+    away = away_vec_xy / away_norm
+
+    best_idx = 0
+    best_score = -1e9
+    for idx, action in enumerate(action_table):
+        vec = np.asarray(action[:2], dtype=np.float32)
+        speed = float(np.linalg.norm(vec))
+        if speed <= 1e-8:
+            score = -0.05  # small preference for moving away when possible
+        else:
+            score = float(np.dot(vec / speed, away)) + 0.15 * speed
+        if score > best_score:
+            best_idx = idx
+            best_score = score
+
+    # If best non-hover still points away weakly, prefer hover for safety.
+    if best_idx != 0 and best_score < 0.05:
+        return 0
+    return int(best_idx)
+
+
+def _apply_collision_shield(
+    obs_dict,
+    agents,
+    action_indices,
+    action_table,
+    horizon_sec,
+    danger_dist,
+    emergency_dist,
+    lidar_danger_dist=0.45,
+    boundary_margin=1.2,
+    arena_x_limits=None,
+    arena_y_limits=None,
+):
+    """Override risky actions to reduce imminent inter-agent collisions.
+
+    The shield predicts short-horizon pair distance using commanded XY velocities.
+    If risk is detected, actions are replaced by hover or "move-away" actions.
+
+    Returns:
+        new_actions (np.ndarray[int64]), override_count (int), override_by_type (dict)
+    """
+    empty_counts = {"inter_agent": 0, "lidar": 0, "boundary": 0}
+    if obs_dict is None:
+        return action_indices, 0, empty_counts
+
+    actions = np.asarray(action_indices, dtype=np.int64).copy()
+    n_agents = len(agents)
+    if n_agents <= 1:
+        return actions, 0, empty_counts
+
+    positions = []
+    for agent in agents:
+        pose = np.asarray(obs_dict.get(agent, {}).get("pose", np.zeros(8, dtype=np.float32)), dtype=np.float32)
+        positions.append(pose[:2].astype(np.float32))
+    positions = np.asarray(positions, dtype=np.float32)
+
+    commanded_xy = np.asarray([action_table[int(a)][:2] for a in actions], dtype=np.float32)
+    predicted = positions + commanded_xy * float(max(horizon_sec, 0.0))
+
+    override_candidates = {}
+
+    def _propose_override(agent_idx, new_action, reason, priority):
+        prev = override_candidates.get(int(agent_idx))
+        if prev is None or int(priority) >= int(prev[0]):
+            override_candidates[int(agent_idx)] = (int(priority), int(new_action), str(reason))
+
+    for i in range(n_agents):
+        for j in range(i + 1, n_agents):
+            rel_now = positions[i] - positions[j]
+            rel_next = predicted[i] - predicted[j]
+            dist_now = float(np.linalg.norm(rel_now))
+            dist_next = float(np.linalg.norm(rel_next))
+            closing = dist_next < dist_now - 1e-4
+            emergency = dist_now <= emergency_dist
+            danger = (dist_next <= danger_dist and closing)
+            if not (emergency or danger):
+                continue
+
+            if emergency:
+                _propose_override(i, 0, "inter_agent", priority=20)
+                _propose_override(j, 0, "inter_agent", priority=20)
+                continue
+
+            away_i = rel_now
+            away_j = -rel_now
+            _propose_override(i, _away_action_index(action_table, away_i), "inter_agent", priority=10)
+            _propose_override(j, _away_action_index(action_table, away_j), "inter_agent", priority=10)
+
+    # Obstacle proximity shield (lidar-only): if too close to an obstacle,
+    # avoid issuing translational motion and prefer hover.
+    lidar_danger_dist = float(max(lidar_danger_dist, 0.0))
+    if lidar_danger_dist > 0.0:
+        for idx, agent in enumerate(agents):
+            lidar = np.asarray(obs_dict.get(agent, {}).get("lidar", np.zeros(0, dtype=np.float32)), dtype=np.float32)
+            if lidar.size <= 0:
+                continue
+            lidar_min = float(np.nanmin(lidar))
+            if not np.isfinite(lidar_min) or lidar_min > lidar_danger_dist:
+                continue
+            cmd_xy = np.asarray(action_table[int(actions[idx])][:2], dtype=np.float32)
+            if float(np.linalg.norm(cmd_xy)) > 1e-6:
+                _propose_override(idx, 0, "lidar", priority=30)
+
+    # Boundary shield: near arena edges, block actions that keep moving outward.
+    if (
+        arena_x_limits is not None
+        and arena_y_limits is not None
+        and boundary_margin is not None
+        and float(boundary_margin) > 0.0
+    ):
+        x_min, x_max = float(arena_x_limits[0]), float(arena_x_limits[1])
+        y_min, y_max = float(arena_y_limits[0]), float(arena_y_limits[1])
+        margin = float(boundary_margin)
+        for idx, pos in enumerate(positions):
+            px, py = float(pos[0]), float(pos[1])
+            away = np.zeros(2, dtype=np.float32)
+            if px - x_min < margin:
+                away[0] += 1.0
+            if x_max - px < margin:
+                away[0] -= 1.0
+            if py - y_min < margin:
+                away[1] += 1.0
+            if y_max - py < margin:
+                away[1] -= 1.0
+            if float(np.linalg.norm(away)) <= 1e-8:
+                continue
+            current_xy = np.asarray(action_table[int(actions[idx])][:2], dtype=np.float32)
+            # Dot > 0 means moving further away from walls (inward), dot < 0 means outward.
+            if float(np.dot(current_xy, away)) < -1e-8:
+                _propose_override(idx, _away_action_index(action_table, away), "boundary", priority=25)
+
+    override_count = 0
+    override_by_type = {"inter_agent": 0, "lidar": 0, "boundary": 0}
+    for idx, (_, new_action, reason) in override_candidates.items():
+        if int(actions[idx]) != int(new_action):
+            actions[idx] = int(new_action)
+            override_count += 1
+            if reason in override_by_type:
+                override_by_type[reason] += 1
+
+    return actions, override_count, override_by_type
+
+
 def _init_agent_task_stats(agents):
     return {
         "agents": {
             agent: {
                 "collided": False,
                 "out_of_bounds": False,
+                "collided_steps": 0,
+                "collision_eval_steps": 0,
                 "revisit_steps": 0,
                 "overlap_steps": 0,
                 "new_cells": 0,
@@ -813,10 +974,15 @@ def _init_agent_task_stats(agents):
 def _update_agent_task_stats(agent_task_stats, infos, step_index):
     for agent, stats in agent_task_stats["agents"].items():
         info = infos.get(agent, {})
+        already_dead = bool(info.get("already_dead", False))
         if info.get("collided", False):
             stats["collided"] = True
+            if not already_dead:
+                stats["collided_steps"] += 1
         if info.get("out_of_bounds", False):
             stats["out_of_bounds"] = True
+        if not already_dead:
+            stats["collision_eval_steps"] += 1
         stats["revisit_steps"] += int(bool(info.get("revisit_cell", False)))
         stats["overlap_steps"] += int(bool(info.get("overlap_cell", False)))
         stats["new_cells"] += int(bool(info.get("newly_covered_cell", False)))
@@ -832,11 +998,14 @@ def _summarize_agent_task_stats(agent_task_stats):
     stats_list = list(agent_task_stats["agents"].values())
     n_agents = max(len(stats_list), 1)
     total_active_steps = max(sum(item["active_steps"] for item in stats_list), 1)
+    total_collided_steps = sum(item["collided_steps"] for item in stats_list)
+    total_collision_eval_steps = max(sum(item["collision_eval_steps"] for item in stats_list), 1)
     total_revisit_steps = sum(item["revisit_steps"] for item in stats_list)
     total_overlap_steps = sum(item["overlap_steps"] for item in stats_list)
     mean_new_cells = float(np.mean([item["new_cells"] for item in stats_list])) if stats_list else 0.0
     return {
         "collision_rate": float(sum(1 for item in stats_list if item["collided"]) / n_agents),
+        "collision_step_rate": float(total_collided_steps / total_collision_eval_steps),
         "out_of_bounds_rate": float(sum(1 for item in stats_list if item["out_of_bounds"]) / n_agents),
         "coverage_rate": float(agent_task_stats["coverage_ratio"]),
         "repeated_coverage_rate": float(total_revisit_steps / total_active_steps),
@@ -995,11 +1164,12 @@ def render_training_plots(run_dir, episode_metrics):
             {"key": "repeated_coverage_rate", "label": "Rate", "title": "Repeated Coverage Rate", "color": "#bcbd22"},
             {"key": "overlap_rate", "label": "Rate", "title": "Agent Overlap Rate", "color": "#1f78b4"},
             {"key": "collision_rate", "label": "Rate", "title": "Collision Rate", "color": "#ff7f0e"},
+            {"key": "collision_step_rate", "label": "Rate", "title": "Collision Step Rate Trend", "color": "#d95f02"},
             {"key": "out_of_bounds_rate", "label": "Rate", "title": "Out-of-Bounds Rate", "color": "#8c564b"},
             {"key": "coverage_completion_time", "label": "Steps", "title": "Coverage Completion Time", "color": "#9467bd"},
             {"key": "full_coverage_success", "label": "Success", "title": "Full Coverage Success", "color": "#2ca02c"},
         ],
-        "Task Metrics",
+        "Task Metrics (Including Collision Step Rate Trend)",
     )
     if task_plot:
         generated_paths.append(task_plot)
@@ -1134,6 +1304,10 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
             env_step_time_sec = 0.0
             train_update_time_sec = 0.0
             train_updates = 0
+            safety_overrides = 0
+            safety_override_inter_agent = 0
+            safety_override_lidar = 0
+            safety_override_boundary = 0
             train_interval = cfg.train_interval
             steps_since_train = 0
 
@@ -1149,6 +1323,24 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                         avail_a_n[i, 0] = 1.0
 
                 a_n = trainer.choose_action(obs_n, last_onehot_a_n, avail_a_n, trainer.epsilon)
+                if cfg.safety_shield_enabled:
+                    a_n, override_count, override_by_type = _apply_collision_shield(
+                        obs,
+                        agents,
+                        a_n,
+                        action_table=trainer.action_table,
+                        horizon_sec=cfg.safety_shield_horizon_sec,
+                        danger_dist=cfg.safety_shield_danger_dist,
+                        emergency_dist=cfg.safety_shield_emergency_dist,
+                        lidar_danger_dist=cfg.safety_shield_lidar_dist,
+                        boundary_margin=cfg.safety_shield_boundary_margin,
+                        arena_x_limits=getattr(env, "arena_x_limits", None),
+                        arena_y_limits=getattr(env, "arena_y_limits", None),
+                    )
+                    safety_overrides += int(override_count)
+                    safety_override_inter_agent += int(override_by_type.get("inter_agent", 0))
+                    safety_override_lidar += int(override_by_type.get("lidar", 0))
+                    safety_override_boundary += int(override_by_type.get("boundary", 0))
                 last_onehot_a_n = np.eye(len(action_table), dtype=np.float32)[a_n]
 
                 continuous = trainer.discrete_to_continuous(a_n)
@@ -1218,6 +1410,10 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                 "benchmark_env_step_time_sec": float(env_step_time_sec),
                 "benchmark_train_update_time_sec": float(train_update_time_sec),
                 "benchmark_train_updates": int(train_updates),
+                "safety_override_count": int(safety_overrides),
+                "safety_override_inter_agent_count": int(safety_override_inter_agent),
+                "safety_override_lidar_count": int(safety_override_lidar),
+                "safety_override_boundary_count": int(safety_override_boundary),
                 **task_metrics,
             }
             _append_jsonl(run_paths["metrics_path"], metrics)
@@ -1236,7 +1432,7 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                 render_training_plots(run_paths["run_dir"], episode_metrics)
 
             LOGGER.info(
-                "Episode %d/%d | Reward=%.3f | Epsilon=%.3f | Loss=%s | Bench(env=%.3fs train=%.3fs updates=%d)",
+                "Episode %d/%d | Reward=%.3f | Epsilon=%.3f | Loss=%s | Bench(env=%.3fs train=%.3fs updates=%d) | ShieldOverrides=%d",
                 episode + 1,
                 n_episodes,
                 episode_reward,
@@ -1245,6 +1441,7 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                 env_step_time_sec,
                 train_update_time_sec,
                 train_updates,
+                safety_overrides,
             )
 
             if cfg.early_stop_enabled and completed_episodes >= cfg.early_stop_min_episodes:
@@ -1314,10 +1511,15 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
         env_times = [item["benchmark_env_step_time_sec"] for item in episode_metrics if "benchmark_env_step_time_sec" in item]
         train_times = [item["benchmark_train_update_time_sec"] for item in episode_metrics if "benchmark_train_update_time_sec" in item]
         train_counts = [item["benchmark_train_updates"] for item in episode_metrics if "benchmark_train_updates" in item]
+        shield_counts = [item["safety_override_count"] for item in episode_metrics if "safety_override_count" in item]
+        shield_inter_agent_counts = [item["safety_override_inter_agent_count"] for item in episode_metrics if "safety_override_inter_agent_count" in item]
+        shield_lidar_counts = [item["safety_override_lidar_count"] for item in episode_metrics if "safety_override_lidar_count" in item]
+        shield_boundary_counts = [item["safety_override_boundary_count"] for item in episode_metrics if "safety_override_boundary_count" in item]
         coverage_rates = [item["coverage_rate"] for item in episode_metrics if "coverage_rate" in item]
         repeated_coverage_rates = [item["repeated_coverage_rate"] for item in episode_metrics if "repeated_coverage_rate" in item]
         overlap_rates = [item["overlap_rate"] for item in episode_metrics if "overlap_rate" in item]
         collision_rates = [item["collision_rate"] for item in episode_metrics if "collision_rate" in item]
+        collision_step_rates = [item["collision_step_rate"] for item in episode_metrics if "collision_step_rate" in item]
         out_of_bounds_rates = [item["out_of_bounds_rate"] for item in episode_metrics if "out_of_bounds_rate" in item]
         coverage_completion_times = [item["coverage_completion_time"] for item in episode_metrics if item.get("coverage_completion_time") is not None]
         full_coverage_successes = [1.0 if item["full_coverage_success"] else 0.0 for item in episode_metrics if "full_coverage_success" in item]
@@ -1346,10 +1548,15 @@ def train_attention_qmix(env, n_episodes=1000, max_steps=500, config: Optional[Q
                 "benchmark_env_step_time_mean_sec": None if not env_times else float(np.mean(env_times)),
                 "benchmark_train_update_time_mean_sec": None if not train_times else float(np.mean(train_times)),
                 "benchmark_train_updates_mean": None if not train_counts else float(np.mean(train_counts)),
+                "safety_override_count_mean": None if not shield_counts else float(np.mean(shield_counts)),
+                "safety_override_inter_agent_count_mean": None if not shield_inter_agent_counts else float(np.mean(shield_inter_agent_counts)),
+                "safety_override_lidar_count_mean": None if not shield_lidar_counts else float(np.mean(shield_lidar_counts)),
+                "safety_override_boundary_count_mean": None if not shield_boundary_counts else float(np.mean(shield_boundary_counts)),
                 "coverage_rate_mean": None if not coverage_rates else float(np.mean(coverage_rates)),
                 "repeated_coverage_rate_mean": None if not repeated_coverage_rates else float(np.mean(repeated_coverage_rates)),
                 "overlap_rate_mean": None if not overlap_rates else float(np.mean(overlap_rates)),
                 "collision_rate_mean": None if not collision_rates else float(np.mean(collision_rates)),
+                "collision_step_rate_mean": None if not collision_step_rates else float(np.mean(collision_step_rates)),
                 "out_of_bounds_rate_mean": None if not out_of_bounds_rates else float(np.mean(out_of_bounds_rates)),
                 "coverage_completion_time_mean": None if not coverage_completion_times else float(np.mean(coverage_completion_times)),
                 "full_coverage_success_rate": None if not full_coverage_successes else float(np.mean(full_coverage_successes)),

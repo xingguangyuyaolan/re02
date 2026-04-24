@@ -4,6 +4,49 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+print_usage() {
+  cat <<'EOF'
+Usage:
+  bash train_curriculum_p0.sh [--start-stage 1|2|3] [--resume-ckpt <path>] [stage1_config] [stage2_config] [stage3_config]
+
+Examples:
+  bash train_curriculum_p0.sh
+  bash train_curriculum_p0.sh --start-stage 2
+  bash train_curriculum_p0.sh --start-stage 2 --resume-ckpt artifacts/qmix/<stage1_run>/best_model.pt
+
+Notes:
+  - --start-stage 2: resumes Stage2 from Stage1 checkpoint
+    (auto-detected from stage1 config when --resume-ckpt is omitted).
+  - --start-stage 3: resumes Stage3 from Stage2 checkpoint
+    (auto-detected from stage2 config when --resume-ckpt is omitted).
+EOF
+}
+
+START_STAGE="1"
+RESUME_CKPT=""
+POSITIONAL_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --start-stage)
+      START_STAGE="${2:-}"
+      shift 2
+      ;;
+    --resume-ckpt)
+      RESUME_CKPT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${POSITIONAL_ARGS[@]}"
+
 # P0 curriculum defaults:
 #   Stage 1: stage_1_open (bootstrap)
 #   Stage 2: stage_2_easy (obstacle transition)
@@ -11,6 +54,12 @@ cd "$ROOT_DIR"
 STAGE1_CONFIG="${1:-configs/p0_stage1_open.json}"
 STAGE2_CONFIG="${2:-configs/p0_stage2_easy.json}"
 STAGE3_CONFIG="${3:-configs/p0_stage3_maze1.json}"
+
+if [[ "$START_STAGE" != "1" && "$START_STAGE" != "2" && "$START_STAGE" != "3" ]]; then
+  echo "[P0][error] --start-stage must be one of: 1, 2, 3 (got: $START_STAGE)" >&2
+  print_usage
+  exit 1
+fi
 
 LOG_DIR="${LOG_DIR:-/tmp/qmix_curriculum}"
 mkdir -p "$LOG_DIR"
@@ -68,6 +117,41 @@ find_latest_run_dir() {
     return 1
   fi
   printf "%s\n" "$latest"
+}
+
+resolve_resume_checkpoint_from_config() {
+  local cfg_path="$1"
+  require_file "$cfg_path"
+
+  local output_root
+  output_root="$(config_get "$cfg_path" "output_root")"
+  local run_name
+  run_name="$(config_get "$cfg_path" "run_name")"
+
+  if [[ -z "$output_root" || -z "$run_name" ]]; then
+    echo "[P0][error] Cannot resolve checkpoint from config (missing output_root/run_name): $cfg_path" >&2
+    exit 1
+  fi
+
+  local latest_run_dir
+  latest_run_dir="$(find_latest_run_dir "$output_root" "$run_name")" || {
+    echo "[P0][error] Cannot find latest run dir for '$run_name' under '$output_root'" >&2
+    exit 1
+  }
+
+  local best_model="$latest_run_dir/best_model.pt"
+  local latest_model="$latest_run_dir/latest_model.pt"
+  if [[ -f "$best_model" ]]; then
+    printf "%s\n" "$best_model"
+    return 0
+  fi
+  if [[ -f "$latest_model" ]]; then
+    printf "%s\n" "$latest_model"
+    return 0
+  fi
+
+  echo "[P0][error] No checkpoint found in latest run dir: $latest_run_dir" >&2
+  exit 1
 }
 
 check_stage_summary() {
@@ -196,23 +280,56 @@ echo "[P0] Curriculum configs:"
 echo "  Stage1: $STAGE1_CONFIG"
 echo "  Stage2: $STAGE2_CONFIG"
 echo "  Stage3: $STAGE3_CONFIG"
+echo "  Start stage: $START_STAGE"
+if [[ -n "$RESUME_CKPT" ]]; then
+  echo "  Resume ckpt: $RESUME_CKPT"
+fi
 echo "  Logs:   $LOG_DIR"
 
 STAGE_CKPT=""
 
-echo "[P0] ===== Stage 1 ====="
-run_stage "stage1" "$STAGE1_CONFIG"
-STAGE1_CKPT="$STAGE_CKPT"
-echo "[P0] Stage 1 checkpoint: $STAGE1_CKPT"
+if [[ "$START_STAGE" == "1" ]]; then
+  echo "[P0] ===== Stage 1 ====="
+  run_stage "stage1" "$STAGE1_CONFIG"
+  STAGE1_CKPT="$STAGE_CKPT"
+  echo "[P0] Stage 1 checkpoint: $STAGE1_CKPT"
 
-echo "[P0] ===== Stage 2 ====="
-run_stage "stage2" "$STAGE2_CONFIG" "$STAGE1_CKPT"
-STAGE2_CKPT="$STAGE_CKPT"
-echo "[P0] Stage 2 checkpoint: $STAGE2_CKPT"
+  echo "[P0] ===== Stage 2 ====="
+  run_stage "stage2" "$STAGE2_CONFIG" "$STAGE1_CKPT"
+  STAGE2_CKPT="$STAGE_CKPT"
+  echo "[P0] Stage 2 checkpoint: $STAGE2_CKPT"
 
-echo "[P0] ===== Stage 3 ====="
-run_stage "stage3" "$STAGE3_CONFIG" "$STAGE2_CKPT"
-STAGE3_CKPT="$STAGE_CKPT"
-echo "[P0] Stage 3 checkpoint: $STAGE3_CKPT"
+  echo "[P0] ===== Stage 3 ====="
+  run_stage "stage3" "$STAGE3_CONFIG" "$STAGE2_CKPT"
+  STAGE3_CKPT="$STAGE_CKPT"
+  echo "[P0] Stage 3 checkpoint: $STAGE3_CKPT"
+elif [[ "$START_STAGE" == "2" ]]; then
+  if [[ -z "$RESUME_CKPT" ]]; then
+    RESUME_CKPT="$(resolve_resume_checkpoint_from_config "$STAGE1_CONFIG")"
+  fi
+  require_file "$RESUME_CKPT"
+  echo "[P0] Starting from Stage 2 using checkpoint: $RESUME_CKPT"
+
+  echo "[P0] ===== Stage 2 ====="
+  run_stage "stage2" "$STAGE2_CONFIG" "$RESUME_CKPT"
+  STAGE2_CKPT="$STAGE_CKPT"
+  echo "[P0] Stage 2 checkpoint: $STAGE2_CKPT"
+
+  echo "[P0] ===== Stage 3 ====="
+  run_stage "stage3" "$STAGE3_CONFIG" "$STAGE2_CKPT"
+  STAGE3_CKPT="$STAGE_CKPT"
+  echo "[P0] Stage 3 checkpoint: $STAGE3_CKPT"
+else
+  if [[ -z "$RESUME_CKPT" ]]; then
+    RESUME_CKPT="$(resolve_resume_checkpoint_from_config "$STAGE2_CONFIG")"
+  fi
+  require_file "$RESUME_CKPT"
+  echo "[P0] Starting from Stage 3 using checkpoint: $RESUME_CKPT"
+
+  echo "[P0] ===== Stage 3 ====="
+  run_stage "stage3" "$STAGE3_CONFIG" "$RESUME_CKPT"
+  STAGE3_CKPT="$STAGE_CKPT"
+  echo "[P0] Stage 3 checkpoint: $STAGE3_CKPT"
+fi
 
 echo "[P0] Curriculum training completed."

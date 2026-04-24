@@ -25,6 +25,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -45,6 +46,24 @@ LOGGER = logging.getLogger(__name__)
 
 def _make_box(low, high, shape, dtype=np.float32):
     return spaces.Box(low=low, high=high, shape=shape, dtype=dtype)
+
+
+def _quat_from_rpy(roll, pitch, yaw):
+    half_roll = roll * 0.5
+    half_pitch = pitch * 0.5
+    half_yaw = yaw * 0.5
+    cr = np.cos(half_roll)
+    sr = np.sin(half_roll)
+    cp = np.cos(half_pitch)
+    sp = np.sin(half_pitch)
+    cy = np.cos(half_yaw)
+    sy = np.sin(half_yaw)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
 
 
 class GazeboMultiUAVParallelEnv(ParallelEnv):
@@ -116,6 +135,8 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         self.agents = list(self.uav_names)
         self.possible_agents = list(self.agents)
         self.world_name = str(world_name)
+        self._project_root = Path(__file__).resolve().parent.parent.parent
+        self._world_sdf_path = self._project_root / "src" / "worlds" / "mazes" / self.world_name
         self._service_world_name = (
             self.world_name[:-4] if self.world_name.endswith(".sdf") else self.world_name
         )
@@ -224,7 +245,15 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         self._first_reset = True
         self._warned_gz_reset_unavailable = False
         self._warned_spawn_layout = False
-        self._spawn_reference_positions = None
+        self._spawn_pose_specs = self._load_spawn_pose_specs()
+        self._spawn_reference_positions = (
+            {
+                agent: np.asarray(spec["position"][:2], dtype=np.float32)
+                for agent, spec in self._spawn_pose_specs.items()
+            }
+            if self._spawn_pose_specs
+            else None
+        )
         self._coverage_visit_counts = None
         self._coverage_owner = None
         self._coverage_grid_shape = self._build_coverage_grid_shape()
@@ -409,6 +438,178 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         x_bins = max(1, int(np.ceil(x_span / self.coverage_cell_size)))
         y_bins = max(1, int(np.ceil(y_span / self.coverage_cell_size)))
         return x_bins, y_bins
+
+    def _load_spawn_pose_specs(self):
+        if not self._world_sdf_path.exists():
+            self._py_logger.warning(
+                "[ResetService] World SDF not found for spawn pose parsing: %s",
+                self._world_sdf_path,
+            )
+            return None
+
+        try:
+            tree = ET.parse(self._world_sdf_path)
+        except ET.ParseError as exc:
+            self._py_logger.warning(
+                "[ResetService] Failed to parse world SDF for spawn poses: %s",
+                exc,
+            )
+            return None
+
+        root = tree.getroot()
+        spawn_specs = {}
+        for include in root.findall(".//include"):
+            name_node = include.find("name")
+            pose_node = include.find("pose")
+            if name_node is None or pose_node is None or not name_node.text:
+                continue
+            agent = name_node.text.strip()
+            if agent not in self.agents:
+                continue
+            pose_tokens = pose_node.text.split()
+            if len(pose_tokens) < 6:
+                continue
+            pose_values = [float(token) for token in pose_tokens[:6]]
+            quat = _quat_from_rpy(pose_values[3], pose_values[4], pose_values[5])
+            spawn_specs[agent] = {
+                "position": np.asarray(pose_values[:3], dtype=np.float32),
+                "orientation": np.asarray(quat, dtype=np.float32),
+            }
+
+        if len(spawn_specs) != len(self.agents):
+            missing_agents = [agent for agent in self.agents if agent not in spawn_specs]
+            if missing_agents:
+                self._py_logger.warning(
+                    "[ResetService] Missing spawn poses for agents in %s: %s",
+                    self._world_sdf_path,
+                    missing_agents,
+                )
+        return spawn_specs or None
+
+    def _build_pose_vector_request(self):
+        if not self._spawn_pose_specs:
+            return None
+
+        pose_entries = []
+        for agent in self.agents:
+            spec = self._spawn_pose_specs.get(agent)
+            if spec is None:
+                return None
+            position = spec["position"]
+            orientation = spec["orientation"]
+            pose_entries.append(
+                "{"
+                f'name: "{agent}" '
+                f'position: {{x: {position[0]:.6f} y: {position[1]:.6f} z: {position[2]:.6f}}} '
+                f'orientation: {{x: {orientation[0]:.8f} y: {orientation[1]:.8f} z: {orientation[2]:.8f} w: {orientation[3]:.8f}}}'
+                "}"
+            )
+        return f"pose: [{', '.join(pose_entries)}]"
+
+    def _set_pose_service_candidates(self, suffix):
+        candidates = []
+        base_services = []
+        if self._active_gz_reset_service is not None:
+            base_services.append(self._active_gz_reset_service)
+        base_services.extend(self._gz_reset_service_candidates)
+        for service in base_services:
+            if service.startswith("/world/") and service.endswith("/control"):
+                candidate = f"{service[:-len('/control')]}/{suffix}"
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        for world_token in [self.world_name, self._service_world_name, "default"]:
+            candidate = f"/world/{world_token}/{suffix}"
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def _call_gz_service(self, service, reqtype, reptype, request, timeout_ms):
+        command = [
+            "gz",
+            "service",
+            "-s",
+            service,
+            "--reqtype",
+            reqtype,
+            "--reptype",
+            reptype,
+            "--timeout",
+            str(timeout_ms),
+            "--req",
+            request,
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max((timeout_ms / 1000.0) + 2.0, 3.0),
+        )
+        output = ((completed.stdout or "") + (completed.stderr or "")).strip()
+        return completed.returncode == 0 and "data: true" in output, output or f"exit code {completed.returncode}"
+
+    def _restore_spawn_poses_via_gz(self):
+        if not self._spawn_pose_specs:
+            return True
+
+        timeout_ms = max(int(self._reset_timeout * 1000), 1500)
+        vector_request = self._build_pose_vector_request()
+        last_output = ""
+
+        if vector_request:
+            for service in self._set_pose_service_candidates("set_pose_vector"):
+                try:
+                    ok, output = self._call_gz_service(
+                        service,
+                        "gz.msgs.Pose_V",
+                        "gz.msgs.Boolean",
+                        vector_request,
+                        timeout_ms,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    last_output = str(exc)
+                    continue
+                last_output = output
+                if ok:
+                    self._py_logger.info("[ResetService] Restored UAV spawn poses via %s", service)
+                    return True
+
+        for agent in self.agents:
+            spec = self._spawn_pose_specs.get(agent)
+            if spec is None:
+                return False
+            request = (
+                f'name: "{agent}" '
+                f'position: {{x: {spec["position"][0]:.6f} y: {spec["position"][1]:.6f} z: {spec["position"][2]:.6f}}} '
+                f'orientation: {{x: {spec["orientation"][0]:.8f} y: {spec["orientation"][1]:.8f} z: {spec["orientation"][2]:.8f} w: {spec["orientation"][3]:.8f}}}'
+            )
+            moved = False
+            for service in self._set_pose_service_candidates("set_pose"):
+                try:
+                    ok, output = self._call_gz_service(
+                        service,
+                        "gz.msgs.Pose",
+                        "gz.msgs.Boolean",
+                        request,
+                        timeout_ms,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    last_output = str(exc)
+                    continue
+                last_output = output
+                if ok:
+                    moved = True
+                    break
+            if not moved:
+                self._py_logger.warning(
+                    "[ResetService] Failed to restore spawn pose for %s: %s",
+                    agent,
+                    last_output or "unknown error",
+                )
+                return False
+
+        self._py_logger.info("[ResetService] Restored UAV spawn poses via per-agent set_pose calls.")
+        return True
 
     def _reset_coverage_state(self):
         x_bins, y_bins = self._coverage_grid_shape
@@ -909,8 +1110,8 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
 
     def _restart_simulation_stack(self):
         """Kill and restart Gazebo + ROS-GZ bridges when Gazebo becomes unresponsive."""
-        project_root = Path(__file__).resolve().parent.parent.parent
-        world_sdf_path = project_root / "src" / "worlds" / "mazes" / self.world_name
+        project_root = self._project_root
+        world_sdf_path = self._world_sdf_path
         bridges_script = project_root / "src" / "scripts" / "setup_bridges.sh"
 
         if not world_sdf_path.exists():
@@ -997,6 +1198,11 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
             raise RuntimeError(
                 f"Failed to reset world '{self.world_name}'. "
                 "Training would continue from old state, so it has been stopped intentionally."
+            )
+
+        if not self._restore_spawn_poses_via_gz():
+            self._py_logger.warning(
+                "[ResetService] Spawn pose restoration did not fully succeed; relying on world reset only."
             )
 
         obs = None

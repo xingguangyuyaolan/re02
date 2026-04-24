@@ -31,6 +31,7 @@ sys.path.append(os.path.dirname(__file__))
 from src.scripts.attention_qmix import (
     QMIXConfig,
     QMIXForUAV,
+        _apply_collision_shield,
     _init_agent_task_stats,
     _obs_dict_to_matrix,
     _summarize_agent_task_stats,
@@ -119,12 +120,13 @@ def _render_eval_plots(output_dir, episode_rows):
         "eval_task_metrics.png",
         [
             {"key": "collision_rate", "label": "Rate", "title": "Collision Rate", "color": "#ff7f0e"},
+            {"key": "collision_step_rate", "label": "Rate", "title": "Collision Step Rate Trend", "color": "#d95f02"},
             {"key": "out_of_bounds_rate", "label": "Rate", "title": "Out-of-Bounds Rate", "color": "#8c564b"},
             {"key": "repeated_coverage_rate", "label": "Rate", "title": "Repeated Coverage Rate", "color": "#17becf"},
             {"key": "overlap_rate", "label": "Rate", "title": "Agent Overlap Rate", "color": "#bcbd22"},
             {"key": "coverage_completion_time", "label": "Steps", "title": "Coverage Completion Time", "color": "#9467bd"},
         ],
-        "Evaluation Task Metrics",
+        "Evaluation Task Metrics (Including Collision Step Rate Trend)",
     )
     return generated_paths
 
@@ -248,6 +250,12 @@ def main():
         use_cross_agent_attention=bool(saved_cfg.get("use_cross_agent_attention", False)),
         cross_agent_attn_heads=int(saved_cfg.get("cross_agent_attn_heads", 4)),
         use_mixing_attention=bool(saved_cfg.get("use_mixing_attention", False)),
+        safety_shield_enabled=bool(saved_cfg.get("safety_shield_enabled", True)),
+        safety_shield_horizon_sec=float(saved_cfg.get("safety_shield_horizon_sec", 0.6)),
+        safety_shield_danger_dist=float(saved_cfg.get("safety_shield_danger_dist", 0.8)),
+        safety_shield_emergency_dist=float(saved_cfg.get("safety_shield_emergency_dist", 0.45)),
+        safety_shield_lidar_dist=float(saved_cfg.get("safety_shield_lidar_dist", 0.45)),
+        safety_shield_boundary_margin=float(saved_cfg.get("safety_shield_boundary_margin", 1.2)),
         # Force epsilon=0 during evaluation (pure greedy, no exploration)
         epsilon=0.0,
         epsilon_min=0.0,
@@ -314,6 +322,7 @@ def main():
         survival_bonus=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="survival_bonus", default=0.0)),
         boundary_penalty_margin=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="boundary_penalty_margin", default=2.0)),
         boundary_penalty_scale=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="boundary_penalty_scale", default=0.3)),
+        step_penalty=float(_cfg_get(saved_env_cfg, saved_train_cfg, key="step_penalty", default=0.01)),
     )
 
     # --- Evaluation loop (epsilon=0, greedy) ---
@@ -322,6 +331,7 @@ def main():
     episode_successes = []
     episode_step_counts = []
     episode_collision_rates = []
+    episode_collision_step_rates = []
     episode_out_of_bounds_rates = []
     episode_coverage_rates = []
     episode_repeat_rates = []
@@ -329,123 +339,186 @@ def main():
     episode_completion_times = []
     episode_full_coverage_successes = []
     episode_rows = []
+    episode_safety_overrides = []
+    episode_safety_override_inter_agent = []
+    episode_safety_override_lidar = []
+    episode_safety_override_boundary = []
 
-    for ep in range(1, args.episodes + 1):
-        obs = env.reset()
-        agents = list(env.agents)
-        obs_n = _obs_dict_to_matrix(obs, agents)
-        last_onehot_a = np.zeros((n_agents, len(action_table)), dtype=np.float32)
-        avail_a_n = np.ones((n_agents, len(action_table)), dtype=np.float32)
-        agent_task_stats = _init_agent_task_stats(agents)
-        ep_reward = 0.0
-        trainer.eval_q.rnn_hidden = None  # Reset recurrent state at episode start
+    def _save_results():
+        """Save whatever results have been collected so far."""
+        if not episode_rows:
+            LOGGER.warning("No episodes completed — nothing to save.")
+            return
+        eval_summary = {
+            "model_path": model_path,
+            "config_path": config_path,
+            "output_dir": eval_output_dir,
+            "episodes_requested": int(args.episodes),
+            "episodes_completed": len(episode_rows),
+            "max_steps": int(args.max_steps),
+            "world": world_name,
+            "mean_reward": float(np.mean(episode_rewards)),
+            "max_reward": float(np.max(episode_rewards)),
+            "min_reward": float(np.min(episode_rewards)),
+            "success_rate": float(np.mean(episode_successes)),
+            "mean_steps": float(np.mean(episode_step_counts)),
+            "coverage_rate_mean": float(np.mean(episode_coverage_rates)),
+            "repeated_coverage_rate_mean": float(np.mean(episode_repeat_rates)),
+            "overlap_rate_mean": float(np.mean(episode_overlap_rates)),
+            "collision_rate_mean": float(np.mean(episode_collision_rates)),
+            "collision_step_rate_mean": float(np.mean(episode_collision_step_rates)),
+            "out_of_bounds_rate_mean": float(np.mean(episode_out_of_bounds_rates)),
+            "coverage_completion_time_mean": None if not episode_completion_times else float(np.mean(episode_completion_times)),
+            "full_coverage_success_rate": float(np.mean(episode_full_coverage_successes)),
+            "safety_override_count_mean": float(np.mean(episode_safety_overrides)) if episode_safety_overrides else 0.0,
+            "safety_override_inter_agent_count_mean": float(np.mean(episode_safety_override_inter_agent)) if episode_safety_override_inter_agent else 0.0,
+            "safety_override_lidar_count_mean": float(np.mean(episode_safety_override_lidar)) if episode_safety_override_lidar else 0.0,
+            "safety_override_boundary_count_mean": float(np.mean(episode_safety_override_boundary)) if episode_safety_override_boundary else 0.0,
+        }
+        _write_jsonl(os.path.join(eval_output_dir, "episode_metrics.jsonl"), episode_rows)
+        _write_json(os.path.join(eval_output_dir, "summary.json"), eval_summary)
+        generated_plots = _render_eval_plots(eval_output_dir, episode_rows)
+        if generated_plots:
+            LOGGER.info("Saved evaluation plots: %s", ", ".join(generated_plots))
+        LOGGER.info("Results saved to %s (%d/%d episodes)", eval_output_dir, len(episode_rows), args.episodes)
 
-        for step in range(args.max_steps):
-            a_n = trainer.choose_action(obs_n, last_onehot_a, avail_a_n, epsilon=0.0)
-
-            # Build last action one-hot
-            new_onehot = np.zeros_like(last_onehot_a)
-            for i, a in enumerate(a_n):
-                new_onehot[i, a] = 1.0
-            last_onehot_a = new_onehot
-
-            actions_cont = trainer.discrete_to_continuous(a_n)
-            actions_dict = {agent: actions_cont[i] for i, agent in enumerate(agents)}
-
-            obs, rewards, dones, infos = env.step(actions_dict)
+    try:
+        for ep in range(1, args.episodes + 1):
+            obs = env.reset()
+            agents = list(env.agents)
             obs_n = _obs_dict_to_matrix(obs, agents)
-            _update_agent_task_stats(agent_task_stats, infos, step + 1)
+            last_onehot_a = np.zeros((n_agents, len(action_table)), dtype=np.float32)
+            avail_a_n = np.ones((n_agents, len(action_table)), dtype=np.float32)
+            agent_task_stats = _init_agent_task_stats(agents)
+            ep_reward = 0.0
+            safety_overrides = 0
+            safety_override_inter_agent = 0
+            safety_override_lidar = 0
+            safety_override_boundary = 0
+            trainer.eval_q.rnn_hidden = None  # Reset recurrent state at episode start
 
-            ep_reward += float(np.mean([rewards[a] for a in agents]))
-            done_all = bool(dones.get("__all__", False))
+            for step in range(args.max_steps):
+                a_n = trainer.choose_action(obs_n, last_onehot_a, avail_a_n, epsilon=0.0)
+                if cfg.safety_shield_enabled:
+                    a_n, override_count, override_by_type = _apply_collision_shield(
+                        obs,
+                        agents,
+                        a_n,
+                        action_table=trainer.action_table,
+                        horizon_sec=cfg.safety_shield_horizon_sec,
+                        danger_dist=cfg.safety_shield_danger_dist,
+                        emergency_dist=cfg.safety_shield_emergency_dist,
+                        lidar_danger_dist=cfg.safety_shield_lidar_dist,
+                        boundary_margin=cfg.safety_shield_boundary_margin,
+                        arena_x_limits=getattr(env, "arena_x_limits", None),
+                        arena_y_limits=getattr(env, "arena_y_limits", None),
+                    )
+                    safety_overrides += int(override_count)
+                    safety_override_inter_agent += int(override_by_type.get("inter_agent", 0))
+                    safety_override_lidar += int(override_by_type.get("lidar", 0))
+                    safety_override_boundary += int(override_by_type.get("boundary", 0))
 
-            if done_all:
-                break
+                # Build last action one-hot
+                new_onehot = np.zeros_like(last_onehot_a)
+                for i, a in enumerate(a_n):
+                    new_onehot[i, a] = 1.0
+                last_onehot_a = new_onehot
 
-        task_metrics = _summarize_agent_task_stats(agent_task_stats)
-        episode_rewards.append(ep_reward)
-        episode_successes.append(1.0 if task_metrics["full_coverage_success"] else 0.0)
-        episode_step_counts.append(step + 1)
-        episode_collision_rates.append(task_metrics["collision_rate"])
-        episode_out_of_bounds_rates.append(task_metrics["out_of_bounds_rate"])
-        episode_coverage_rates.append(task_metrics["coverage_rate"])
-        episode_repeat_rates.append(task_metrics["repeated_coverage_rate"])
-        episode_overlap_rates.append(task_metrics["overlap_rate"])
-        if task_metrics["coverage_completion_time"] is not None:
-            episode_completion_times.append(task_metrics["coverage_completion_time"])
-        episode_full_coverage_successes.append(1.0 if task_metrics["full_coverage_success"] else 0.0)
-        episode_rows.append(
-            {
-                "episode": int(ep),
-                "reward": float(ep_reward),
-                "steps": int(step + 1),
-                "success": 1.0 if task_metrics["full_coverage_success"] else 0.0,
-                "collision_rate": float(task_metrics["collision_rate"]),
-                "out_of_bounds_rate": float(task_metrics["out_of_bounds_rate"]),
-                "coverage_rate": float(task_metrics["coverage_rate"]),
-                "repeated_coverage_rate": float(task_metrics["repeated_coverage_rate"]),
-                "overlap_rate": float(task_metrics["overlap_rate"]),
-                "coverage_completion_time": None if task_metrics["coverage_completion_time"] is None else float(task_metrics["coverage_completion_time"]),
-                "full_coverage_success": 1.0 if task_metrics["full_coverage_success"] else 0.0,
-            }
-        )
+                actions_cont = trainer.discrete_to_continuous(a_n)
+                actions_dict = {agent: actions_cont[i] for i, agent in enumerate(agents)}
 
-        LOGGER.info(
-            "Episode %d/%d | Reward=%.3f | Steps=%d | Coverage=%.2f | FullCoverage=%s | Repeat=%.2f | Overlap=%.2f | CollisionRate=%.2f | OOBRate=%.2f | CompletionStep=%s",
-            ep, args.episodes, ep_reward, step + 1,
-            task_metrics["coverage_rate"],
-            task_metrics["full_coverage_success"],
-            task_metrics["repeated_coverage_rate"],
-            task_metrics["overlap_rate"],
-            task_metrics["collision_rate"],
-            task_metrics["out_of_bounds_rate"],
-            "None" if task_metrics["coverage_completion_time"] is None else str(task_metrics["coverage_completion_time"]),
-        )
+                obs, rewards, dones, infos = env.step(actions_dict)
+                obs_n = _obs_dict_to_matrix(obs, agents)
+                _update_agent_task_stats(agent_task_stats, infos, step + 1)
 
-    eval_summary = {
-        "model_path": model_path,
-        "config_path": config_path,
-        "output_dir": eval_output_dir,
-        "episodes": int(args.episodes),
-        "max_steps": int(args.max_steps),
-        "world": world_name,
-        "mean_reward": float(np.mean(episode_rewards)),
-        "max_reward": float(np.max(episode_rewards)),
-        "min_reward": float(np.min(episode_rewards)),
-        "success_rate": float(np.mean(episode_successes)),
-        "mean_steps": float(np.mean(episode_step_counts)),
-        "coverage_rate_mean": float(np.mean(episode_coverage_rates)),
-        "repeated_coverage_rate_mean": float(np.mean(episode_repeat_rates)),
-        "overlap_rate_mean": float(np.mean(episode_overlap_rates)),
-        "collision_rate_mean": float(np.mean(episode_collision_rates)),
-        "out_of_bounds_rate_mean": float(np.mean(episode_out_of_bounds_rates)),
-        "coverage_completion_time_mean": None if not episode_completion_times else float(np.mean(episode_completion_times)),
-        "full_coverage_success_rate": float(np.mean(episode_full_coverage_successes)),
-    }
-    _write_jsonl(os.path.join(eval_output_dir, "episode_metrics.jsonl"), episode_rows)
-    _write_json(os.path.join(eval_output_dir, "summary.json"), eval_summary)
-    generated_plots = _render_eval_plots(eval_output_dir, episode_rows)
-    if generated_plots:
-        LOGGER.info("Saved evaluation plots: %s", ", ".join(generated_plots))
+                ep_reward += float(np.mean([rewards[a] for a in agents]))
+                done_all = bool(dones.get("__all__", False))
+
+                if done_all:
+                    break
+
+            task_metrics = _summarize_agent_task_stats(agent_task_stats)
+            episode_rewards.append(ep_reward)
+            episode_successes.append(1.0 if task_metrics["full_coverage_success"] else 0.0)
+            episode_step_counts.append(step + 1)
+            episode_collision_rates.append(task_metrics["collision_rate"])
+            episode_collision_step_rates.append(task_metrics["collision_step_rate"])
+            episode_out_of_bounds_rates.append(task_metrics["out_of_bounds_rate"])
+            episode_coverage_rates.append(task_metrics["coverage_rate"])
+            episode_repeat_rates.append(task_metrics["repeated_coverage_rate"])
+            episode_overlap_rates.append(task_metrics["overlap_rate"])
+            if task_metrics["coverage_completion_time"] is not None:
+                episode_completion_times.append(task_metrics["coverage_completion_time"])
+            episode_full_coverage_successes.append(1.0 if task_metrics["full_coverage_success"] else 0.0)
+            episode_safety_overrides.append(float(safety_overrides))
+            episode_safety_override_inter_agent.append(float(safety_override_inter_agent))
+            episode_safety_override_lidar.append(float(safety_override_lidar))
+            episode_safety_override_boundary.append(float(safety_override_boundary))
+            episode_rows.append(
+                {
+                    "episode": int(ep),
+                    "reward": float(ep_reward),
+                    "steps": int(step + 1),
+                    "success": 1.0 if task_metrics["full_coverage_success"] else 0.0,
+                    "collision_rate": float(task_metrics["collision_rate"]),
+                    "collision_step_rate": float(task_metrics["collision_step_rate"]),
+                    "out_of_bounds_rate": float(task_metrics["out_of_bounds_rate"]),
+                    "coverage_rate": float(task_metrics["coverage_rate"]),
+                    "repeated_coverage_rate": float(task_metrics["repeated_coverage_rate"]),
+                    "overlap_rate": float(task_metrics["overlap_rate"]),
+                    "coverage_completion_time": None if task_metrics["coverage_completion_time"] is None else float(task_metrics["coverage_completion_time"]),
+                    "full_coverage_success": 1.0 if task_metrics["full_coverage_success"] else 0.0,
+                    "safety_override_count": int(safety_overrides),
+                    "safety_override_inter_agent_count": int(safety_override_inter_agent),
+                    "safety_override_lidar_count": int(safety_override_lidar),
+                    "safety_override_boundary_count": int(safety_override_boundary),
+                }
+            )
+
+            LOGGER.info(
+                "Episode %d/%d | Reward=%.3f | Steps=%d | Coverage=%.2f | FullCoverage=%s | Repeat=%.2f | Overlap=%.2f | CollisionRate=%.2f | OOBRate=%.2f | CompletionStep=%s | ShieldOverrides=%d",
+                ep, args.episodes, ep_reward, step + 1,
+                task_metrics["coverage_rate"],
+                task_metrics["full_coverage_success"],
+                task_metrics["repeated_coverage_rate"],
+                task_metrics["overlap_rate"],
+                task_metrics["collision_rate"],
+                task_metrics["out_of_bounds_rate"],
+                "None" if task_metrics["coverage_completion_time"] is None else str(task_metrics["coverage_completion_time"]),
+                safety_overrides,
+            )
+
+    except (KeyboardInterrupt, Exception) as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            LOGGER.warning("Evaluation interrupted by user after %d/%d episodes", len(episode_rows), args.episodes)
+        else:
+            LOGGER.error("Evaluation failed at episode %d: %s", len(episode_rows) + 1, exc, exc_info=True)
+    finally:
+        _save_results()
 
     # --- Summary ---
-    print("\n" + "=" * 50)
-    print(f"Evaluation Summary ({args.episodes} episodes)")
-    print("=" * 50)
-    print(f"  Mean reward  : {np.mean(episode_rewards):.3f}")
-    print(f"  Max  reward  : {np.max(episode_rewards):.3f}")
-    print(f"  Min  reward  : {np.min(episode_rewards):.3f}")
-    print(f"  Full coverage success : {np.mean(episode_successes) * 100:.1f}%  ({int(sum(episode_successes))}/{args.episodes})")
-    print(f"  Mean steps   : {np.mean(episode_step_counts):.1f}")
-    print(f"  Coverage rate        : {np.mean(episode_coverage_rates) * 100:.1f}%")
-    print(f"  Repeat coverage rate : {np.mean(episode_repeat_rates) * 100:.1f}%")
-    print(f"  Overlap rate         : {np.mean(episode_overlap_rates) * 100:.1f}%")
-    print(f"  Collision rate        : {np.mean(episode_collision_rates) * 100:.1f}%")
-    print(f"  Out-of-bounds rate    : {np.mean(episode_out_of_bounds_rates) * 100:.1f}%")
-    print(f"  Coverage completion   : {np.mean(episode_completion_times):.1f} steps" if episode_completion_times else "  Coverage completion   : N/A")
-    print(f"  Full-coverage success : {np.mean(episode_full_coverage_successes) * 100:.1f}%")
-    print(f"  Output dir            : {eval_output_dir}")
-    print("=" * 50)
+    if episode_rows:
+        n_done = len(episode_rows)
+        print("\n" + "=" * 50)
+        print(f"Evaluation Summary ({n_done}/{args.episodes} episodes)")
+        print("=" * 50)
+        print(f"  Mean reward  : {np.mean(episode_rewards):.3f}")
+        print(f"  Max  reward  : {np.max(episode_rewards):.3f}")
+        print(f"  Min  reward  : {np.min(episode_rewards):.3f}")
+        print(f"  Full coverage success : {np.mean(episode_successes) * 100:.1f}%  ({int(sum(episode_successes))}/{n_done})")
+        print(f"  Mean steps   : {np.mean(episode_step_counts):.1f}")
+        print(f"  Coverage rate        : {np.mean(episode_coverage_rates) * 100:.1f}%")
+        print(f"  Repeat coverage rate : {np.mean(episode_repeat_rates) * 100:.1f}%")
+        print(f"  Overlap rate         : {np.mean(episode_overlap_rates) * 100:.1f}%")
+        print(f"  Collision rate        : {np.mean(episode_collision_rates) * 100:.1f}%")
+        print(f"  Out-of-bounds rate    : {np.mean(episode_out_of_bounds_rates) * 100:.1f}%")
+        print(f"  Coverage completion   : {np.mean(episode_completion_times):.1f} steps" if episode_completion_times else "  Coverage completion   : N/A")
+        print(f"  Full-coverage success : {np.mean(episode_full_coverage_successes) * 100:.1f}%")
+        print(f"  Safety overrides      : {np.mean(episode_safety_overrides):.1f} per episode")
+        print(f"  Output dir            : {eval_output_dir}")
+        print("=" * 50)
+    else:
+        print("\nNo episodes completed. No results to display.")
 
     env.close()
 

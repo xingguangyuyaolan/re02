@@ -411,19 +411,19 @@
     <include>
       <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav2</uri>
       <name>uav2</name>
-      <pose>-4.600 -3.000 1.00 0 0 0</pose>
+      <pose>-4.400 -3.000 1.00 0 0 0</pose>
     </include>
 
     <include>
       <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav3</uri>
       <name>uav3</name>
-      <pose>-5.000 -2.600 1.00 0 0 0</pose>
+      <pose>-5.000 -2.400 1.00 0 0 0</pose>
     </include>
 
     <include>
       <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav4</uri>
       <name>uav4</name>
-      <pose>-4.600 -2.600 1.00 0 0 0</pose>
+      <pose>-4.400 -2.400 1.00 0 0 0</pose>
     </include>
 
   </world>
