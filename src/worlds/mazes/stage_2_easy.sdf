@@ -58,22 +58,22 @@
       </link>
     </model>
     
-    <!-- Simple maze walls (12 walls for easy difficulty) -->
+    <!-- 3 small obstacles for easy obstacle-introduction stage -->
     <model name="wall_0">
       <static>true</static>
-      <pose>-7.0 -3.0 0.5 0 0 0</pose>
+      <pose>-2.0 0.0 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>2.0 2.0 1.0</size>
+              <size>1.0 1.0 1.0</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>2.0 2.0 1.0</size>
+              <size>1.0 1.0 1.0</size>
             </box>
           </geometry>
           <material>
@@ -86,19 +86,19 @@
 
     <model name="wall_1">
       <static>true</static>
-      <pose>-3.0 -5.0 0.5 0 0 0</pose>
+      <pose>2.0 -2.0 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>2.0 2.0 1.0</size>
+              <size>1.0 1.0 1.0</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>2.0 2.0 1.0</size>
+              <size>1.0 1.0 1.0</size>
             </box>
           </geometry>
           <material>
@@ -111,244 +111,19 @@
 
     <model name="wall_2">
       <static>true</static>
-      <pose>-3.0 -1.0 0.5 0 0 0</pose>
+      <pose>4.0 3.0 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>2.0 2.0 1.0</size>
+              <size>1.0 1.0 1.0</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_3">
-      <static>true</static>
-      <pose>1.0 -3.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_4">
-      <static>true</static>
-      <pose>1.0 1.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_5">
-      <static>true</static>
-      <pose>5.0 -1.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_6">
-      <static>true</static>
-      <pose>5.0 3.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_7">
-      <static>true</static>
-      <pose>-1.0 5.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_8">
-      <static>true</static>
-      <pose>3.0 5.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_9">
-      <static>true</static>
-      <pose>-5.0 1.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_10">
-      <static>true</static>
-      <pose>-5.0 5.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_11">
-      <static>true</static>
-      <pose>3.0 -5.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>2.0 2.0 1.0</size>
+              <size>1.0 1.0 1.0</size>
             </box>
           </geometry>
           <material>
@@ -379,28 +154,6 @@
         </visual>
       </link>
     </model>
-    
-    <!-- End Point (Red) -->
-    <model name="end_marker">
-      <static>true</static>
-      <pose>1.0 5.0 0.001 0 0 0</pose>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <cylinder>
-              <radius>0.5</radius>
-              <length>0.002</length>
-            </cylinder>
-          </geometry>
-          <material>
-            <ambient>0 0 0 1</ambient>
-            <diffuse>0 0 0 1</diffuse>
-            <emissive>0 0 0 1</emissive>
-          </material>
-        </visual>
-      </link>
-    </model>    
-    
     <!-- Multi-UAV agents (each uses its own cmd_vel/odom namespace) -->
     <include>
       <uri>file:///home/aiz/下载/基于ROS2 Jazzy与Gazebo Harmonic仿真环境的迷宫求解机器人(2)/src/models/uav1</uri>

@@ -181,6 +181,22 @@ class QNetworkRNN(nn.Module):
         return self.fc2(hidden)
 
 
+class VDNNet(nn.Module):
+    """Value Decomposition Network: Q_tot = sum_i Q_i.
+
+    The simplest monotonic mixing — just sums individual agent Q-values.
+    Ignores state, has no learnable parameters.
+    """
+
+    def __init__(self, n_agents, state_dim=None, batch_size=None, qmix_hidden_dim=None, hyper_hidden_dim=None, hyper_layers_num=None):
+        super().__init__()
+        self.n_agents = int(n_agents)
+
+    def forward(self, q, s=None):
+        # q: (B, T, N)  ->  (B, T, 1)
+        return q.sum(dim=-1, keepdim=True)
+
+
 class QMixNet(nn.Module):
     def __init__(self, n_agents, state_dim, batch_size, qmix_hidden_dim=32, hyper_hidden_dim=64, hyper_layers_num=1):
         super().__init__()
@@ -388,6 +404,7 @@ class QMIXConfig:
     use_cross_agent_attention: bool = False
     cross_agent_attn_heads: int = 4
     use_mixing_attention: bool = False
+    use_vdn: bool = False
     train_interval: int = 2
     # Early stopping controls
     early_stop_enabled: bool = False
@@ -459,8 +476,13 @@ class QMIXForUAV:
             self.cross_agent_attn = None
             self.target_cross_agent_attn = None
 
-        # Mixing network (with or without state attention)
-        MixClass = StateAttentionQMixNet if config.use_mixing_attention else QMixNet
+        # Mixing network (VDN, QMIX, or QMIX + state attention)
+        if config.use_vdn:
+            MixClass = VDNNet
+        elif config.use_mixing_attention:
+            MixClass = StateAttentionQMixNet
+        else:
+            MixClass = QMixNet
         self.eval_mix = MixClass(n_agents, state_dim, config.batch_size, config.qmix_hidden_dim, config.hyper_hidden_dim, config.hyper_layers_num).to(self.device)
         self.target_mix = MixClass(n_agents, state_dim, config.batch_size, config.qmix_hidden_dim, config.hyper_hidden_dim, config.hyper_layers_num).to(self.device)
         self.target_mix.load_state_dict(self.eval_mix.state_dict())

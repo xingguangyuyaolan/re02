@@ -235,6 +235,7 @@ def main():
         use_cross_agent_attention=bool(_get_value(cfg_file, "use_cross_agent_attention", False)),
         cross_agent_attn_heads=int(_get_value(cfg_file, "cross_agent_attn_heads", 4)),
         use_mixing_attention=bool(_get_value(cfg_file, "use_mixing_attention", False)),
+        use_vdn=bool(_get_value(cfg_file, "use_vdn", False)),
         safety_shield_enabled=bool(_get_value(cfg_file, "safety_shield_enabled", True)),
         safety_shield_horizon_sec=float(_get_value(cfg_file, "safety_shield_horizon_sec", 0.6)),
         safety_shield_danger_dist=float(_get_value(cfg_file, "safety_shield_danger_dist", 0.8)),

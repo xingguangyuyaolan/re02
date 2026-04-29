@@ -31,7 +31,7 @@ sys.path.append(os.path.dirname(__file__))
 from src.scripts.attention_qmix import (
     QMIXConfig,
     QMIXForUAV,
-        _apply_collision_shield,
+    _apply_collision_shield,
     _init_agent_task_stats,
     _obs_dict_to_matrix,
     _summarize_agent_task_stats,
@@ -99,8 +99,8 @@ def _render_eval_plots(output_dir, episode_rows):
             axis.grid(True, alpha=0.25)
 
         axes[-1].set_xlabel("Episode")
-        fig.suptitle(title)
-        fig.tight_layout()
+        fig.suptitle(title, fontsize=13, y=0.98)
+        fig.tight_layout(rect=[0.02, 0.02, 0.98, 0.94])
         output_path = os.path.join(output_dir, filename)
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -212,7 +212,7 @@ def main():
         action_table = run_config["action_table"]
         saved_cfg = run_config.get("config", {})
         saved_env_cfg = run_config.get("env_config", {})
-        saved_train_cfg = run_config.get("train_config", {})
+        saved_train_cfg = run_config.get("config", {})
     else:
         LOGGER.warning("config.json not found; using default architecture parameters")
         n_agents, obs_dim, state_dim = 4, 110, 440
@@ -222,14 +222,12 @@ def main():
             [-0.6, 0.0, 0.0, 0.0],
             [0.0, 0.8, 0.0, 0.0],
             [0.0, -0.8, 0.0, 0.0],
-            [0.0, 0.0, 0.5, 0.0],
-            [0.0, 0.0, -0.4, 0.0],
+            [0.0, 0.0, 0.4, 0.0],
+            [0.0, 0.0, -0.3, 0.0],
             [0.6, 0.6, 0.0, 0.0],
             [0.6, -0.6, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.8],
-            [0.0, 0.0, 0.0, -0.8],
-            [0.6, 0.0, 0.3, 0.0],
-            [0.6, 0.0, -0.2, 0.0],
+            [-0.6, 0.6, 0.0, 0.0],
+            [-0.6, -0.6, 0.0, 0.0],
         ]
         saved_cfg = {}
         saved_env_cfg = {}
@@ -250,6 +248,7 @@ def main():
         use_cross_agent_attention=bool(saved_cfg.get("use_cross_agent_attention", False)),
         cross_agent_attn_heads=int(saved_cfg.get("cross_agent_attn_heads", 4)),
         use_mixing_attention=bool(saved_cfg.get("use_mixing_attention", False)),
+        use_vdn=bool(saved_cfg.get("use_vdn", False)),
         safety_shield_enabled=bool(saved_cfg.get("safety_shield_enabled", True)),
         safety_shield_horizon_sec=float(saved_cfg.get("safety_shield_horizon_sec", 0.6)),
         safety_shield_danger_dist=float(saved_cfg.get("safety_shield_danger_dist", 0.8)),
@@ -263,6 +262,7 @@ def main():
         device=args.device,
     )
 
+    cfg.max_episode_steps = args.max_steps
     trainer = QMIXForUAV(n_agents, obs_dim, state_dim, action_table, cfg)
     meta = trainer.load_checkpoint(model_path)
     # Override epsilon to 0 after loading (checkpoint may have stored a >0 value)

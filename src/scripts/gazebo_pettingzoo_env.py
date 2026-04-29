@@ -83,8 +83,6 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         world_name="maze_1.sdf",
         reset_timeout=2.0,
         max_steps=500,
-        goal_xyz=(1.0, 5.0, 1.0),
-        goal_radius=0.8,
         min_height=0.2,
         max_height=3.0,
         collision_lidar_threshold=0.25,
@@ -142,8 +140,6 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         )
         self._reset_timeout = float(reset_timeout)
         self.max_steps = int(max_steps)
-        self.goal_xyz = np.asarray(goal_xyz, dtype=np.float32)
-        self.goal_radius = float(goal_radius)
         self.min_height = float(min_height)
         self.max_height = float(max_height)
         self.collision_lidar_threshold = float(collision_lidar_threshold)
@@ -236,7 +232,6 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
         self._last_lidar = {agent: None for agent in self.agents}
         self._odom_update_count = {agent: 0 for agent in self.agents}
         self._lidar_update_count = {agent: 0 for agent in self.agents}
-        self._prev_goal_dist = {agent: None for agent in self.agents}
         self._step_count = 0
         self._coverage_complete = False
         self._coverage_completion_step = None
@@ -1214,7 +1209,6 @@ class GazeboMultiUAVParallelEnv(ParallelEnv):
             self._last_lidar = {agent: None for agent in self.agents}
             self._dones = {agent: False for agent in self.agents}
             self._collision_cooldown = {agent: 0 for agent in self.agents}
-            self._prev_goal_dist = {agent: None for agent in self.agents}
             self._step_count = 0
             self._reset_coverage_state()
 
