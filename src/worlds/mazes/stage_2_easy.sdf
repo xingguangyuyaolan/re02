@@ -58,60 +58,10 @@
       </link>
     </model>
     
-    <!-- 3 small obstacles for easy obstacle-introduction stage -->
+    <!-- 1 small obstacle for easy obstacle-introduction stage -->
     <model name="wall_0">
       <static>true</static>
-      <pose>-2.0 0.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.0 1.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.0 1.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_1">
-      <static>true</static>
-      <pose>2.0 -2.0 0.5 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.0 1.0 1.0</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.0 1.0 1.0</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.4 1</ambient>
-            <diffuse>0.4 0.4 0.5 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="wall_2">
-      <static>true</static>
-      <pose>4.0 3.0 0.5 0 0 0</pose>
+      <pose>-7.0 7.0 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>

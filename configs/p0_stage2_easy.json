@@ -1,13 +1,13 @@
 {
   "episodes": 300,
-  "max_steps": 700,
+  "max_steps": 600,
   "seed": 7,
   "world_name": "stage_2_easy.sdf",
   "arena_x_limits": [-10.0, 10.0],
   "arena_y_limits": [-10.0, 10.0],
 
   "coverage_cell_size": 1.0,
-  "coverage_target_ratio": 0.55,
+  "coverage_target_ratio": 0.8,
   "coverage_new_cell_reward": 0.55,
   "coverage_completion_bonus": 18.0,
   "revisit_cell_penalty": 0.12,
